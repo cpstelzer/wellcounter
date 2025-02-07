@@ -1,9 +1,26 @@
 # -*- coding: utf-8 -*-
 """
+Wellcounter motion module
+
+This software is part of the following publication:
+"Wellcounter: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates"
+Methods in Ecology and Evolution
+
+The latest version can be found at https://github.com/cpstelzer/wellcounter
+
+Description:
 A Python module containing functions for reviewing detected particles one by one,
 assigning particle type categories, labeling them in an image, and detecting false negatives.
 
 As an example of using this module, see the script wc_assign_particletypes.py.
+
+Note: Portions of the code in this file were generated using ChatGPT v4.0.
+      All AI-generated content has been rigorously validated and tested by the 
+      authors. The corresponding author accepts full responsibility for the 
+      AI-assisted portions of the code.
+
+Author: Claus-Peter Stelzer
+Date: 2025-02-07
 """
 
 import cv2

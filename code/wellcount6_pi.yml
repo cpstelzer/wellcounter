@@ -1,0 +1,21 @@
+name: wellcount6_pi
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10.11
+  - git
+  - pyserial
+  - numpy
+  - matplotlib
+  - opencv
+  - pandas
+  - gstreamer
+  - gst-plugins-base
+  - gst-plugins-good
+  - scipy
+  - scikit-learn
+  - gst-plugins-ugly
+  - gst-plugins-bad
+  - pyyaml
+prefix: C:\Users\.conda\envs\wellcount6_pi

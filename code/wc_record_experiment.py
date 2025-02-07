@@ -1,5 +1,14 @@
 # -*- coding: utf-8 -*-
 """
+Wellcounter acquisition module
+
+This software is part of the following publication:
+"Wellcounter: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates"
+Methods in Ecology and Evolution
+
+The latest version can be found at https://github.com/cpstelzer/wellcounter
+
+Description:
 This script automates the process of recording experimental data with the WELLCOUNTER 
 using a combination of serial communication, image acquisition, and video recording. 
 The main functionalities include controlling an XY-scanning table, acquiring images with 
@@ -25,8 +34,15 @@ Dependencies: csv, serial, time, cv2, os, pypylon, datetime, math, pandas
 
 Usage:
 Run the script and provide the batch number when prompted. Ensure that the necessary hardware and setup conditions 
-are met before execution (for more details see "WELLCOUNTER: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates 
-                          Using Image Acquisition and Analysis with Multiwell Plates".
+are met before execution.
+                          
+Note: Portions of the code in this file were generated using ChatGPT v4.0.
+      All AI-generated content has been rigorously validated and tested by the 
+      authors. The corresponding author accepts full responsibility for the 
+      AI-assisted portions of the code.
+
+Author: Claus-Peter Stelzer
+Date: 2025-02-07
 
 """
 

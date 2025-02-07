@@ -1,8 +1,25 @@
 # -*- coding: utf-8 -*-
 
 """
+Wellcounter imaging module
+
+This software is part of the following publication:
+"Wellcounter: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates"
+Methods in Ecology and Evolution
+
+The latest version can be found at https://github.com/cpstelzer/wellcounter
+
+Description:
 This module contains several low-level and high-level functions for identifying
 microorganisms in the WELLCOUNTER based on recorded mp4-movies.
+
+Note: Portions of the code in this file were generated using ChatGPT v4.0.
+      All AI-generated content has been rigorously validated and tested by the 
+      authors. The corresponding author accepts full responsibility for the 
+      AI-assisted portions of the code.
+
+Author: Claus-Peter Stelzer
+Date: 2025-02-07
 
 """
 

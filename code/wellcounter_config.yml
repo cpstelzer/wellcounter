@@ -1,0 +1,35 @@
+motion:
+  analysis_duration: 3
+  max_search_distance: 20
+  min_trajectory_size: 5
+  trajectory_random_colors: false
+optimize:
+  area_from: 150
+  area_step: 50
+  area_to: 400
+  output_folder: C:/wellcounter/training_data_for_MEE
+  threshold_from: 8
+  threshold_step: 8
+  threshold_to: 24
+  training_path: C:/wellcounter/training_data_for_MEE
+outputs:
+  motion: true
+  particle_detection: true
+particle_detection:
+  background_is_dark: true
+  default_particle_area: 500
+  filter_by_shape: false
+  microorganism_blur: 5
+  microorganism_threshold: 8
+  min_microorganism_area: 300
+  search_radius_factor: 2
+  unsubtracted_threshold: 70
+system:
+  image_height_px: 4504
+  image_width_px: 4504
+wellplate:
+  auto_center_mask: false
+  create_mask: false
+  perfect_circle: true
+  radius_px: 2200
+  type: 6
