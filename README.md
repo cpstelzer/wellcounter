@@ -3,6 +3,8 @@
 ## Overview
 The **Wellcounter** is an open-source platform designed for **automated high-throughput phenotyping** of aquatic microinvertebrates. It enables large-scale ecological experiments by automating **image acquisition, processing, and analysis**, significantly reducing manual effort in tracking population growth and swimming behavior.
 
+
+
 This repository provides resources for **building and using** the Wellcounter, including:
 - **Hardware design**: Instructions for assembling the Wellcounter using commercially available and 3D-printed components.
 - **Software**: Python-based modules for automated data acquisition, image analysis, and motion tracking.
