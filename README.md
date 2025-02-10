@@ -1,7 +1,7 @@
 # Wellcounter: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates
 
 ## Overview
-The **Wellcounter** is an advanced open-source platform designed for **automated high-throughput phenotyping** of aquatic microinvertebrates. It enables large-scale ecological experiments by automating **image acquisition, processing, and analysis**, significantly reducing manual effort in tracking population growth and swimming behavior.
+The **Wellcounter** is an open-source platform designed for **automated high-throughput phenotyping** of aquatic microinvertebrates. It enables large-scale ecological experiments by automating **image acquisition, processing, and analysis**, significantly reducing manual effort in tracking population growth and swimming behavior.
 
 This repository provides resources for **building and using** the Wellcounter, including:
 - **Hardware design**: Instructions for assembling the Wellcounter using commercially available and 3D-printed components.
@@ -13,8 +13,8 @@ The Wellcounter was introduced in:
 
 ## Features
 - **Automated Imaging**: Captures high-resolution images and videos using a motorized **XY linear guide system**.
-- **High-Throughput Analysis**: Handles up to **84 six-well plates** (504 populations) in two batches.
-- **Image & Motion Analysis**: Quantifies population size and individual swimming behavior.
+- **High-Throughput Analysis**: Handles up to **42 six-well plates** (252 populations) per batch. The recording of one batch takes about 1-1.5 hours per day. Multiple batches are possible
+- **Image & Motion Analysis**: Quantifies population size and swimming behavior.
 - **Customizable & Open-Source**: Fully programmable and adaptable to different microorganisms.
 - **3D-Printed Components**: CAD files for custom-designed adapters and mounts included.
 
@@ -31,15 +31,18 @@ conda activate wellcount6_pi
 
 ### 3. Data Acquisition & Analysis
 - **Automated Imaging**: The `wc_record_experiment.py` script controls the Wellcounter for video acquisition.
-- **Image Analysis**: The `wc_analyze_one_sample.py` script detects and quantifies microorganisms.
+- **Image Analysis**: The `wc_analyze_one_sample.py` script detects and quantifies microorganisms in a recorded movie.
 - **Motion Analysis**: The motion module tracks swimming behavior over time.
 - **Optimization Module**: Fine-tunes imaging parameters using a training dataset.
 
 ## Documentation & Tutorials
 - **[Wellcounter Manual](https://github.com/cpstelzer/wellcounter)**: Step-by-step guide to assembling and using the system.
-- **[Supplementary Information](https://github.com/cpstelzer/wellcounter)**: Technical details, CAD files, and software documentation.
 - **Example Datasets**:
-  - Training & test data available via Zenodo (DOI links in the supplementary materials).
+  - Training & test data available via Zenodo:
+    10.5281/zenodo.14833208
+    10.5281/zenodo.14833370
+    10.5281/zenodo.14833381
+    
 
 ## Citation
 If you use the Wellcounter in your research, please cite:
