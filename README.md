@@ -6,6 +6,9 @@ The **Wellcounter** is an open-source platform designed for **automated high-thr
 ![image](https://github.com/user-attachments/assets/149059b9-145a-4224-b2af-888d132008c5)
 **Fig. 1 Wellcounter device**
 
+![image](https://github.com/user-attachments/assets/6a02f671-388c-42da-987d-ebf24991d39a)
+**Fig. 2 Left: Six-Well plate, Middle: Rotifers detected in one well, Right: Detected individuals
+
 This repository provides resources for **building and using** the Wellcounter, including:
 - **Hardware design**: Instructions for assembling the Wellcounter using commercially available and 3D-printed components.
 - **Software**: Python-based modules for automated data acquisition, image analysis, and motion tracking.
