@@ -38,10 +38,10 @@ conda activate wellcount6_pi
 ## Documentation & Tutorials
 - **[Wellcounter Manual](https://github.com/cpstelzer/wellcounter)**: Step-by-step guide to assembling and using the system.
 - **Example Datasets**:
-  - Training & test data available via Zenodo:
-    10.5281/zenodo.14833208
-    10.5281/zenodo.14833370
-    10.5281/zenodo.14833381
+  Training & test data available via Zenodo:
+  - 10.5281/zenodo.14833208
+  - 10.5281/zenodo.14833370
+  - 10.5281/zenodo.14833381
     
 
 ## Citation
@@ -51,6 +51,4 @@ If you use the Wellcounter in your research, please cite:
 ## License
 This project is released under an **open-source license**, allowing modifications and contributions from the scientific community.
 
----
-For more details, visit the [Wellcounter repository](https://github.com/cpstelzer/wellcounter).
 
