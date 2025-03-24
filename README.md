@@ -15,7 +15,7 @@ This repository provides resources for **building and using** the Wellcounter, i
 - **Documentation**: A detailed manual and supplementary materials supporting setup and optimization.
 
 The Wellcounter was introduced in:
-> Stelzer, C.P. & Groffman, D. (2025) *Wellcounter: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates*. Methods in Ecology and Evolution.
+> Stelzer, C.-P., & Groffman, D. (2025). Wellcounter: Automated high-throughput phenotyping for aquatic microinvertebrates. Methods in Ecology and Evolution, 00, 1–14. https://doi.org/10.1111/2041-210X.70012
 
 ## Features
 - **Automated Imaging**: Captures high-resolution images and videos using a motorized **XY linear guide system**.
@@ -52,7 +52,7 @@ conda activate wellcount6_pi
 
 ## Citation
 If you use the Wellcounter in your research, please cite:
-> Stelzer, C.P. & Groffman, D. (2025) *Wellcounter: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates*. Methods in Ecology and Evolution.
+> Stelzer, C.-P., & Groffman, D. (2025). Wellcounter: Automated high-throughput phenotyping for aquatic microinvertebrates. Methods in Ecology and Evolution, 00, 1–14. https://doi.org/10.1111/2041-210X.70012
 
 ## License
 This project is released under an **open-source license**, allowing modifications and contributions from the scientific community.
