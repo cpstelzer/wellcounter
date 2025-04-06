@@ -117,6 +117,10 @@ def calculate_measurements(contour):
         'solidity': solidity,
         'eccentricity': eccentricity,
         'feret_diameter': feret_diameter
+        'bounding_x': x,
+        'bounding_y': y,
+        'bounding_w': w,
+        'bounding_h': h
     }
 
 
@@ -240,7 +244,7 @@ def analyze_microorganisms(image):
     
     # Initialize an empty DataFrame
     columns = ["X", "Y", "area", "perimeter", "orientation", "aspect_ratio", "solidity", "eccentricity",
-               "feret_diameter"]
+               "feret_diameter", "bounding_x", "bounding_y", "bounding_w", "bounding_h"]
     df = pd.DataFrame(columns=columns)
     
     if valid_contours:
