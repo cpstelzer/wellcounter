@@ -116,7 +116,7 @@ def calculate_measurements(contour):
         'aspect_ratio': aspect_ratio,
         'solidity': solidity,
         'eccentricity': eccentricity,
-        'feret_diameter': feret_diameter
+        'feret_diameter': feret_diameter,
         'bounding_x': x,
         'bounding_y': y,
         'bounding_w': w,
