@@ -835,7 +835,7 @@ def count_particles(video_path):
     video.release()
     
     # Calculate the three frames to be analyzed
-    frame1 = 0 # beginning of video
+    frame1 = 1 # beginning of video
     frame2 = math.floor(duration_in_seconds/2) # near middle of video
     frame3 = math.floor(duration_in_seconds-1) # near end of video
     

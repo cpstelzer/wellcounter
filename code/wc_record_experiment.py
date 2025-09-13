@@ -57,10 +57,10 @@ import math
 import pandas as pd
 
 
-# Serial port configuration
+# Serial port configuration XY scanning table
 ser = serial.Serial()
 ser.baudrate = 9600
-ser.port = 'COM5'
+ser.port = 'COM9'
 
 # Set up serial connection to Numato USB relay (controls light)
 portName = "COM4"  # Adjust if necessary
@@ -68,7 +68,7 @@ relayNum = "1"     # Relay number to control
 numato = serial.Serial(portName, 19200, timeout=1)
 
 # Path to store the subtracted images
-output_folder = "D:/popgrowth_20240313/"
+output_folder = "C:/wellcounter/Kurs_2025/subtracted_images/"
 
 # Delay between sending Gcode commands (in seconds)
 command_delay = 3
@@ -83,8 +83,9 @@ acceleration = 1  # mm/s^2
 # Global variable to store the previous position
 prev_position = (0, 0)
 
+
 # Add a global variable to store the path to the movies folder
-movies_folder = "D:/popgrowth_20240403/"
+movies_folder = "C:/wellcounter/Kurs_2025/"
 
 # Global variable to specify the duration of the video recording (in seconds)
 video_duration = 15
@@ -311,10 +312,10 @@ def main(csv_file):
             time.sleep(1)  # Wait for 1 second
             
             # Acquire images (uncomment, if images - in addition to movies - shall be recorded)
-            #image_a, image_b = acquire_images()
+            image_a, image_b = acquire_images()
     
             # Create output filenames and save the subtracted images
-            #save_subtracted_images(image_a, image_b, output_folder, current_date, plate, well, batch)
+            save_subtracted_images(image_a, image_b, output_folder, current_date, plate, well, batch)
                         
             # Record video at the current position
             video_rec_time = record_video(current_date, plate, well, batch)
@@ -359,7 +360,8 @@ def main(csv_file):
     print(f"Total running time: {hours} hours {minutes} minutes {seconds} seconds")
 
 if __name__ == "__main__":
-    csv_file = "wellpositions_all.csv"  # File containing the positions of all plates and wells
+    #csv_file = "C:/CodeLab/wellcounter/code/wellpositions_all_driftcompensated.csv"  # File containing the positions of all plates and wells
+    csv_file = "C:/CodeLab/wellcounter/code/wellpositions_one.csv"  # File containing the positions of all plates and wells
     batch = int(input("Enter the batch number: "))  # Prompt user for batch number
     user_input = input("Please ensure that:\n"
                   "1) Plates are in their correct positions, and lids have been removed\n"

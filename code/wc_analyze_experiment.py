@@ -51,12 +51,12 @@ import pandas as pd
 import wellcounter_imaging_module as wim
 import wellcounter_motion_module as wmm
 
-main_dir = "C:/Users/Anaconda"
-data_dir = "D:/popgrowth_20230822/movies"  # Location of videos
-treat_file = "popgrowth_20240822_treatments.csv" # File containing info on treatments assigned to each well and plate
-outfile = "popgrowth_20240822_results.csv" # Output of this analysis
-start_date = 20230822
-end_date = 20230828
+main_dir = "D:/popgrowth_20250627/"
+data_dir = "D:/popgrowth_20250627/movies"  # Location of videos
+treat_file = "popgrowth_20250627_treatments.csv" # File containing info on treatments assigned to each well and plate
+outfile = "popgrowth_20250627_results.csv" # Output of this analysis
+start_date = 20250701
+end_date = 20250702
 
 # Load experiment csv-file
 treat_df = pd.read_csv(os.path.join(main_dir, treat_file))
@@ -79,7 +79,7 @@ while date < end_date + 1: # Iterate through each date of the experiment
         ac_no = row['ac'] # Contains information of treatment (here: clone number)
 
         # Derive video path
-        video_file = f'{date}_batch{batch_no}_plate{plate_no}_well{well_no}.mp4'
+        video_file = f'{date}_batch{batch_no}_plate{plate_no}_well{well_no}.avi'
         print("Video file currently analyzed:")
         print(video_file)
         video_path = os.path.join(data_dir, video_file)

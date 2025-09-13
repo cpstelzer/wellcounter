@@ -32,8 +32,8 @@ import wellcounter_imaging_module as wim
 import wellcounter_motion_module as wmm
 
 # Enter the path to the to be analyzed
-data_dir = "C:/wellcounter/sandbox"  # Location of video file
-video_file = "20240206_fems30_plate42_well2.mp4" # name of video file
+data_dir = "D:/popgrowth_20250627"  # Location of video file
+video_file = "20250702_batch1_plate37_well6.avi" # name of video file
 video_path = os.path.join(data_dir, video_file)
 
 # Calculate avg. number of organisms based on three frames of the video
