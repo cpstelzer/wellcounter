@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Wellcounter acquisition module
+Wellcounter acquisition module (Modified Version 2)
 
 This software is part of the following publication:
 "Wellcounter: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates"
@@ -9,40 +9,24 @@ Methods in Ecology and Evolution
 The latest version can be found at https://github.com/cpstelzer/wellcounter
 
 Description:
-This script automates the process of recording experimental data with the WELLCOUNTER 
-using a combination of serial communication, image acquisition, and video recording. 
-The main functionalities include controlling an XY-scanning table, acquiring images with 
-a camera, subtracting images, and recording videos. The script performs the following steps:
+This script automates the process of recording experimental data with the WELLCOUNTER.
+This modified version incorporates modern data handling features inspired by the
+Wellscanner system:
 
-1. Initializes serial connections to control an XY-scanning table and a USB relay for lighting control.
-2. Moves the XY-scanning table to specified well positions to capture data.
-3. Acquires images using a Basler camera and performs image subtraction.
-4. Records a video at each well using the camera.
-5. Logs the current position and video recording times to CSV files.
+1.  **Configuration via YAML**: Key parameters are loaded from `wc_config.yaml`.
+2.  **Individual Frame Storage**: Saves a sequence of individual image frames.
+3.  **Organized Folder Structure**: Each well is saved in a dedicated folder.
+4.  **Self-Contained Metadata**: The FPS setting is embedded directly into each
+    image's filename (e.g., ..._f00001_fps25.png).
+5.  **Asynchronous Saving**: Uses a ThreadPoolExecutor for high-performance,
+    non-blocking image saving.
+6.  **Comprehensive Metadata Logging**: Creates detailed per-well and summary logs.
 
-Key components and their functionalities:
-- Serial communication setup for controlling the XY-scanning table and Numato USB relay.
-- Functions for sending Gcode commands, moving the table, and updating/getting the current position.
-- Image acquisition and subtraction using the pypylon library and OpenCV.
-- Video recording using the pypylon library and OpenCV.
-- Main execution flow that reads positions from a CSV file, moves the table, controls lighting, acquires data, and records videos.
-
-The script assumes specific hardware configurations and paths for data storage, which may need to be adjusted 
-based on the actual experimental setup.
-
-Dependencies: csv, serial, time, cv2, os, pypylon, datetime, math, pandas
-
-Usage:
-Run the script and provide the batch number when prompted. Ensure that the necessary hardware and setup conditions 
-are met before execution.
-                          
-Note: Portions of the code in this file were generated using ChatGPT v4.0.
-      All AI-generated content has been rigorously validated and tested by the 
-      authors. The corresponding author accepts full responsibility for the 
-      AI-assisted portions of the code.
+Dependencies: csv, serial, time, cv2, os, pypylon, datetime, math, pandas, yaml, concurrent.futures
 
 Author: Claus-Peter Stelzer
 Date: 2025-02-07
+Modification Date: 2025-09-22
 
 """
 
@@ -51,322 +35,267 @@ import serial
 import time
 import cv2
 import os
+import yaml
+import traceback
 from pypylon import pylon
-from datetime import date
+from datetime import datetime, date
 import math
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-
-# Serial port configuration XY scanning table
+# --- Global Hardware and Movement Parameters ---
 ser = serial.Serial()
 ser.baudrate = 9600
 ser.port = 'COM9'
-
-# Set up serial connection to Numato USB relay (controls light)
-portName = "COM4"  # Adjust if necessary
-relayNum = "1"     # Relay number to control
+portName = "COM4"
+relayNum = "1"
 numato = serial.Serial(portName, 19200, timeout=1)
-
-# Path to store the subtracted images
-output_folder = "C:/wellcounter/Kurs_2025/subtracted_images/"
-
-# Delay between sending Gcode commands (in seconds)
 command_delay = 3
-
-# Control the delay after capturing each image
-image_capture_delay = 2
-
-# XY-scanning table movement parameters
-speed = 1.6  # cm/s
-acceleration = 1  # mm/s^2
-
-# Global variable to store the previous position
+speed = 1.6
+acceleration = 1
 prev_position = (0, 0)
 
+# --- Configuration Loading ---
+def load_config(config_path="wc_record_config.yaml"):
+    print(f"Loading configuration from: {config_path}")
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        print("Configuration loaded successfully.")
+        return config
+    except FileNotFoundError:
+        print(f"FATAL ERROR: Configuration file not found at {config_path}")
+        exit(1)
+    except yaml.YAMLError as e:
+        print(f"FATAL ERROR: Failed to parse configuration file: {e}")
+        exit(1)
 
-# Add a global variable to store the path to the movies folder
-movies_folder = "C:/wellcounter/Kurs_2025/"
-
-# Global variable to specify the duration of the video recording (in seconds)
-video_duration = 15
-
-# Global variable to specify the frame rate for video recording
-frame_rate = 25
-
+# --- XY Table Control Functions (Unchanged) ---
 def send_gcode_command(command):
-    """Send a Gcode command to the XY-scanning table"""
     ser.write(command.encode('utf-8'))
     ser.readline()
     time.sleep(command_delay)
 
 def move_to_position(x, y):
-    """Move the XY-scanning table to the specified position"""
-    
     gcode_command = f"G1 X{x} Y{y}\n"
     send_gcode_command(gcode_command)
     ser.readline()
     time.sleep(command_delay)
-
     global prev_position
-
-    # Calculate the traveling distance
     distance = math.sqrt((x - prev_position[0]) ** 2 + (y - prev_position[1]) ** 2)
-
-    print("Previous position:", prev_position[0], ", ", prev_position[1])
-    print("New position:", x, ", ", y)
-    print("Distance to travel:", distance)
-    
-
-    # Calculate the traveling delay based on speed and acceleration
+    print(f"Previous position: {prev_position[0]}, {prev_position[1]}")
+    print(f"New position: {x}, {y}")
+    print(f"Distance to travel: {distance:.2f}")
     traveling_delay = distance / speed + (speed / acceleration)
-
-    print("Traveling delay:", traveling_delay)
-    print("") # Empty line
-
-    # Add the traveling delay
+    print(f"Traveling delay: {traveling_delay:.2f}s\n")
     time.sleep(traveling_delay)
-
-    # Update the previous position
     prev_position = (x, y)
+    time.sleep(2)
 
-    # Add a delay after moving to the new position
-    time.sleep(image_capture_delay)
+# --- Core Acquisition and Saving Function ---
+def acquire_and_save_frames(executor, config, run_folder_path, current_date_str, plate, well):
+    print(f"--- Starting Frame Acquisition for Plate {plate}, Well {well} ---")
+    print(f"Outputting to folder: {run_folder_path}")
+
+    duration = config['acquisition']['duration_sec']
+    fps = config['acquisition']['fps']
+    exposure = config['acquisition']['exposure_us']
+    total_frames_to_record = int(duration * fps)
     
-def update_current_position(position):
-    """Update the current position in the CSV file"""
-    with open(csv_file, "a") as file:
-        writer = csv.writer(file)
-        writer.writerow(["", position[0], position[1]])
+    output_format = config['output']['image_format'].lower()
+    if output_format not in ['bmp', 'jpg']:
+        output_format = 'png'
+    print(f"Saving frames as '.{output_format}'")
 
-def get_current_position():
-    """Get the previous position from the CSV file or return the initial position"""
-    if os.path.isfile(csv_file):
-        with open(csv_file, "r") as file:
-            reader = csv.reader(file)
-            last_row = None
-            for row in reader:
-                last_row = row
-            if last_row:
-                _, plate, x, y = last_row
-                return float(x), float(y)
-    return 0, 0  # Return the initial position if the CSV file doesn't exist or is empty
-
-
-def acquire_images():
-    """Acquire two images with a time interval of 2 seconds"""
-
-    # Connect to the first available camera
-    camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
-
-    # Start the camera
-    camera.Open()
-
-    # Set camera parameters if needed (e.g., exposure time, gain, etc.)
-    camera.ExposureTime.SetValue(15000)  # Set exposure time to 15 ms
-
-    # Capture picture A
-    camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
-    grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
-
-    if grabResult.GrabSucceeded():
-        # Convert the grabbed image to a numpy array or perform other processing
-        image_a = grabResult.Array
-
-    # Release the grab result and stop the grabbing
-    grabResult.Release()
-    camera.StopGrabbing()
-
-    # Add a delay after capturing the first image
-    time.sleep(image_capture_delay)
-
-    # Capture picture B
-    camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
-    grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
-
-    if grabResult.GrabSucceeded():
-        # Convert the grabbed image to a numpy array or perform other processing
-        image_b = grabResult.Array
-
-    # Release the grab result and stop the grabbing
-    grabResult.Release()
-    camera.StopGrabbing()
-
-    # Close the camera
-    camera.Close()
-
-    return image_a, image_b
-
-  
-def save_subtracted_images(image_a, image_b, output_folder, current_date, plate, well, batch):
-    """Subtract image B from image A and save the two subtracted pictures"""
-    subtracted_image_1 = cv2.subtract(image_a, image_b)
-    subtracted_image_2 = cv2.subtract(image_b, image_a)
-
-    filename_1 = f"{current_date}_batch{batch}_plate{plate}_well{well}_a.jpg"
-    filename_2 = f"{current_date}_batch{batch}_plate{plate}_well{well}_b.jpg"
-
-    output_path_1 = os.path.join(output_folder, filename_1)
-    output_path_2 = os.path.join(output_folder, filename_2)
-
-    cv2.imwrite(output_path_1, subtracted_image_1)
-    cv2.imwrite(output_path_2, subtracted_image_2)
+    log_fieldnames = [
+        "timestamp", "frame_count", "pylon_frame_id",
+        "frame_grab_time_ms", "image_save_submit_time_ms",
+        "total_loop_iteration_time_ms", "output_filename"
+    ]
+    log_data = []
     
-    # Save original image (for diagnostics only)
-    #cv2.imwrite(output_path_1, image_a)
- 
+    camera = None
+    try:
+        camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+        camera.Open()
+        camera.ExposureTime.SetValue(exposure)
+        
+        print(f"Attempting to acquire {total_frames_to_record} frames over {duration}s at {fps} FPS...")
+        camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+        
+        start_acquisition_time = time.perf_counter()
+        futures = {}
+
+        for frame_count in range(total_frames_to_record):
+            loop_iter_start_time = time.perf_counter()
+            log_entry = {}
+            
+            grabResult = None
+            try:
+                grab_start_time = time.perf_counter()
+                grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+                grab_end_time = time.perf_counter()
+                log_entry["frame_grab_time_ms"] = (grab_end_time - grab_start_time) * 1000
+
+                if grabResult.GrabSucceeded():
+                    frame_image = grabResult.Array
+                    pylon_frame_id = grabResult.GetBlockID() if hasattr(grabResult, "GetBlockID") else "N/A"
+                    
+                    # --- FILENAME CHANGE ---
+                    # Embed the FPS setting directly into the filename.
+                    img_filename = (f"{current_date_str}_plate{plate}_well{well}_"
+                                    f"f{frame_count:05d}_fps{int(fps)}.{output_format}")
+                    # --- END OF CHANGE ---
+
+                    output_path = os.path.join(run_folder_path, img_filename)
+
+                    save_submit_start_time = time.perf_counter()
+                    future = executor.submit(cv2.imwrite, output_path, frame_image)
+                    futures[future] = output_path
+                    save_submit_end_time = time.perf_counter()
+
+                    log_entry["timestamp"] = datetime.now().isoformat()
+                    log_entry["frame_count"] = frame_count
+                    log_entry["pylon_frame_id"] = pylon_frame_id
+                    log_entry["image_save_submit_time_ms"] = (save_submit_end_time - save_submit_start_time) * 1000
+                    log_entry["output_filename"] = output_path
+                else:
+                    print(f"Frame {frame_count} grab failed: {grabResult.GetErrorDescription()}")
+            
+            finally:
+                if grabResult:
+                    grabResult.Release()
+            
+            loop_iter_end_time = time.perf_counter()
+            log_entry["total_loop_iteration_time_ms"] = (loop_iter_end_time - loop_iter_start_time) * 1000
+            log_data.append(log_entry)
+
+        print("Finished acquisition loop. Waiting for file saving to complete...")
+        
+        saved_count, error_count = 0, 0
+        for future in as_completed(futures):
+            try:
+                future.result()
+                saved_count += 1
+            except Exception as e:
+                print(f"ERROR saving frame {futures[future]}: {e}")
+                error_count += 1
+        print(f"Successfully saved {saved_count} frames with {error_count} errors.")
+
+        log_file_path = os.path.join(run_folder_path, config['paths']['log_filename'])
+        pd.DataFrame(log_data).to_csv(log_file_path, index=False)
+        print(f"Detailed metadata log saved to: {log_file_path}")
+        
+        return {'status': 'success' if error_count == 0 else 'error', 'frames_saved': saved_count, 'fps_setting': fps}
+
+    except Exception as e:
+        print(f"FATAL ERROR during acquisition for well {well}: {e}")
+        traceback.print_exc()
+        return {'status': 'failed', 'frames_saved': 0, 'fps_setting': fps}
     
+    finally:
+        if camera and camera.IsGrabbing(): camera.StopGrabbing()
+        if camera and camera.IsOpen(): camera.Close()
+        print("--- Camera released ---")
 
-def record_video(current_date, plate, well, batch):
-    
+# --- Logging Functions ---
+def initialize_summary_log(log_path):
+    if not os.path.exists(log_path):
+        with open(log_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "datetime", "batch", "plate", "well",
+                "status", "frames_saved", "fps_setting", "run_folder"
+            ])
+        print(f"Initialized experiment summary log: {log_path}")
 
-    video_filename = f"{current_date}_batch{batch}_plate{plate}_well{well}.mp4"
-    output_path = os.path.join(movies_folder, video_filename)
+def append_to_summary_log(log_path, batch, plate, well, results, run_folder):
+    try:
+        with open(log_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                batch, plate, well,
+                results.get('status', 'failed'),
+                results.get('frames_saved', 0),
+                results.get('fps_setting', 0),
+                run_folder
+            ])
+    except Exception as e:
+        print(f"Error writing to summary log {log_path}: {e}")
 
-    # Connect to the first available camera
-    camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
-
-    # Start the camera
-    camera.Open()
-
-    # Set camera parameters if needed (e.g., exposure time, gain, etc.)
-    camera.ExposureTime.SetValue(15000)  # Set exposure time to 15 ms
-
-    # Create a VideoWriter object to record the video
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Use mp4v codec
-
-   # Disable OpenVX backend to avoid GStreamer conflicts
-    cv2.setUseOpenVX(False)
-
-    video_writer = cv2.VideoWriter(output_path, fourcc, frame_rate, (camera.Width.GetValue(), camera.Height.GetValue()))
-
-    # Start grabbing once
-    camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
-
-    # Start recording
+# --- Main Execution Block ---
+def main(csv_file, batch, config):
     start_time = time.time()
-
-    while (time.time() - start_time) < video_duration:
-        grab_result = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
-
-        if grab_result.GrabSucceeded():
-            # Convert the grabbed image to a numpy array or perform other processing
-            image_frame = grab_result.Array
-            video_writer.write(image_frame)
-
-        # Release the grab result
-        grab_result.Release()
-
-    # Stop recording and release the VideoWriter object
-    camera.StopGrabbing()
-    video_writer.release()
     
-    # Stop the stopwatch
-    end_time = time.time()
-    video_rec_time = end_time - start_time
-    print("Video recording time: ", video_rec_time, "secs")
+    base_output_dir = config['paths']['output_folder_base']
+    summary_log_path = os.path.join(base_output_dir, config['paths']['experiment_summary_log_filename'])
+    initialize_summary_log(summary_log_path)
 
-    # Close the camera
-    camera.Close()
-    
-    return video_rec_time
-    
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+        try:
+            ser.open()
+            ser.readline()
+            send_gcode_command("$x\n")
 
-def main(csv_file): 
-    
-    # Start the stopwatch
-    start_time = time.time()
+            with open(csv_file, "r") as file:
+                reader = csv.reader(file)
+                next(reader)
 
-    # Open serial port
-    ser.open()
-    ser.readline()
+                current_date_str = date.today().strftime("%Y%m%d")
 
-    # Unlock table
-    send_gcode_command("$x\n")
-    
-    video_log = pd.read_csv(os.path.join(movies_folder, 'video_log.csv'))
+                for row in reader:
+                    plate, well, originX, originY = row
+                    x, y = float(originX), float(originY)
+                    
+                    print(f"\n================ PROCESSING PLATE: {plate}, WELL: {well} ================")
+                    
+                    run_folder_name = f"{current_date_str}_plate{plate}_well{well}"
+                    run_folder_path = os.path.join(base_output_dir, run_folder_name)
+                    os.makedirs(run_folder_path, exist_ok=True)
+                    
+                    move_to_position(x, y)
+                    time.sleep(5)
+                    
+                    numato.write(f"relay on {relayNum}\n\r".encode())
+                    print(f"Relay {relayNum} is ON")
+                    time.sleep(1)
+                    
+                    results = acquire_and_save_frames(executor, config, run_folder_path, current_date_str, plate, well)
+                    
+                    numato.write(f"relay off {relayNum}\n\r".encode())
+                    print(f"Relay {relayNum} is OFF")
+                    
+                    append_to_summary_log(summary_log_path, batch, plate, well, results, run_folder_path)
 
-    # Load data from CSV file
-    with open(csv_file, "r") as file:
-        reader = csv.reader(file)
-        next(reader)  # Skip header row if present
+            move_to_position(0, 0)
 
-        # Get the current date
-        current_date = date.today().strftime("%Y%m%d")
+        except Exception as e:
+            print(f"An error occurred in the main loop: {e}")
+            traceback.print_exc()
+        
+        finally:
+            if ser.is_open:
+                ser.close()
+            print("Serial port closed.")
 
-        for row in reader:
-            plate, well, originX, originY = row
-    
-            x = float(originX) 
-            y = float(originY) 
-           
-            print("Plate:", plate, " Well:", well)
-            
-            # Move the XY-scanning table to the initial position
-            move_to_position(x, y)
-            
-            time.sleep(5)  # Wait for 5 secs in the dark
-            
-            # Turn the LED light on
-            numato.write("relay on {}\n\r".format(relayNum).encode())
-            print("Relay {} is ON".format(relayNum))
-            time.sleep(1)  # Wait for 1 second
-            
-            # Acquire images (uncomment, if images - in addition to movies - shall be recorded)
-            image_a, image_b = acquire_images()
-    
-            # Create output filenames and save the subtracted images
-            save_subtracted_images(image_a, image_b, output_folder, current_date, plate, well, batch)
-                        
-            # Record video at the current position
-            video_rec_time = record_video(current_date, plate, well, batch)
-            
-            # Logging actual video recording time
-            curr_log = pd.DataFrame({
-                'current_date': [current_date],
-                'fems': [batch],
-                'plate':[plate],
-                'well': [well],
-                'video_rec_time': [video_rec_time],
-            })
-            
-            # Collecting the video recording times of different wells
-            video_log = pd.concat([video_log, curr_log], ignore_index=True)
-            
-            # Turn the relay off
-            numato.write("relay off {}\n\r".format(relayNum).encode())
-            print("Relay {} is OFF".format(relayNum))
-            
-
-
-    # Move the XY-scanning table to the origin (drift compensated)
-    move_to_position(0, 0)
-
-    # Close the serial port
-    ser.close()
-    
-    # Saving the video logfile
-    video_log.to_csv(os.path.join(movies_folder, 'video_log.csv'), index=False)
-    
-    # Stop the stopwatch
     end_time = time.time()
     execution_time = end_time - start_time
-    
-    # Convert the execution time to hours, minutes, and seconds
-    hours = int(execution_time // 3600)
-    minutes = int((execution_time % 3600) // 60)
-    seconds = int(execution_time % 60)
-
-    # Print the total running time
-    print(f"Total running time: {hours} hours {minutes} minutes {seconds} seconds")
+    hours, rem = divmod(execution_time, 3600)
+    minutes, seconds = divmod(rem, 60)
+    print(f"\nTotal running time: {int(hours):02}:{int(minutes):02}:{int(seconds):02}")
 
 if __name__ == "__main__":
-    #csv_file = "C:/CodeLab/wellcounter/code/wellpositions_all_driftcompensated.csv"  # File containing the positions of all plates and wells
-    csv_file = "C:/CodeLab/wellcounter/code/wellpositions_one.csv"  # File containing the positions of all plates and wells
-    batch = int(input("Enter the batch number: "))  # Prompt user for batch number
-    user_input = input("Please ensure that:\n"
-                  "1) Plates are in their correct positions, and lids have been removed\n"
-                  "2) Plates in columns 3-5 have been pushed to the left\n"
-                  "3) White cardboard for alignment has been removed\n"
-                  "4) All the lights in the room are turned off\n"
-                  "(Press return to continue)\n")
-    main(csv_file)
+    try:
+        config = load_config()
+        csv_file = "C:/CodeLab/wellcounter/code/wellpositions_one.csv"
+        batch = int(input("Enter the batch number: "))
+        user_input = input("Please ensure that:\n"
+                      "1) Plates are in their correct positions, and lids have been removed\n"
+                      "2) Plates in columns 3-5 have been pushed to the left\n"
+                      "3) White cardboard for alignment has been removed\n"
+                      "4) All the lights in the room are turned off\n"
+                      "(Press return to continue)\n")
+        main(csv_file, batch, config)
+    except Exception as e:
+        print(f"An unexpected error occurred at the top level: {e}")

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Script: wc_analyze_experiment
+Script: wc_analyze_experiment (Modified for FPS-in-Filename)
 
 This software is part of the following publication:
 "Wellcounter: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates"
@@ -9,107 +9,92 @@ Methods in Ecology and Evolution
 The latest version can be found at https://github.com/cpstelzer/wellcounter
 
 Description:
-This script demonstrates the principle of batch-analyzing an entire 
-WELLCOUNTER experiment. It processes raw data consisting of movies recorded from 
-each batch/plate/well over consecutive days of the experiment (e.g., using 
-the script 'wc_record_experiment.py'). 
+This script batch-analyzes a WELLCOUNTER experiment from image sequences where
+the FPS is embedded in the filenames.
 
 Requirements:
-1. Raw video data recorded for each batch/plate/well during the experiment.
-2. A CSV file named '...treatments.csv' containing information on which 
-   batch/plate/well corresponds to which treatment. The format of this file 
-   should be as follows:
-    
-    batch,plate,well,ac
-    1,1,1,23
-    1,1,2,15
-    1,1,3,23
-    ...
-    
-    (in this example the column 'ac' is a clone identification number)
+1. Raw image sequence data stored in dedicated folders.
+2. A CSV file named '...treatments.csv' containing treatment information.
 
 Functionality:
-This script iterates through each sample for each day of the experiment, performs 
-analyses on the populations (including counting and motion analysis), and combines 
-the results with the information on the treatments.
-
-Key Steps:
-1. Load the treatment information from 'treatments.csv'.
-2. Iterate through each date within the experiment period.
-3. For each batch, plate, and well, derive the path to the corresponding video file.
-4. Analyze the video to count the number of organisms and perform motion analysis.
-5. Combine the analysis results with the treatment information.
-6. Append the results to an output CSV file.
+Iterates through each sample defined in the treatment file, finds the
+corresponding data folder, performs analysis, and combines the results.
 
 Author: Claus-Peter Stelzer
 Date: 2025-02-07
-
+Modification Date: 2025-09-22
 """
 
 import os
 import pandas as pd
 import wellcounter_imaging_module as wim
 import wellcounter_motion_module as wmm
+from datetime import datetime
 
+# --- Configuration ---
 main_dir = "D:/popgrowth_20250627/"
-data_dir = "D:/popgrowth_20250627/movies"  # Location of videos
-treat_file = "popgrowth_20250627_treatments.csv" # File containing info on treatments assigned to each well and plate
-outfile = "popgrowth_20250627_results.csv" # Output of this analysis
-start_date = 20250701
-end_date = 20250702
+data_base_dir = os.path.join(main_dir, "image_sequences")
+treat_file = "popgrowth_20250627_treatments.csv"
+outfile = "popgrowth_20250627_results.csv"
 
-# Load experiment csv-file
-treat_df = pd.read_csv(os.path.join(main_dir, treat_file))
+# --- Main Analysis ---
 
-# Initialize an empty DataFrame to collect the results
-result_df = pd.DataFrame()
-
+treat_path = os.path.join(main_dir, treat_file)
 outpath = os.path.join(main_dir, outfile)
-  
-date = start_date       
-    
-while date < end_date + 1: # Iterate through each date of the experiment
-    
-    treat = treat_df
- 
-    for index, row in treat.iterrows(): # Iterate through each batch, plate and well
-        batch_no = row['batch']
-        plate_no = row['plate']
-        well_no = row['well']
-        ac_no = row['ac'] # Contains information of treatment (here: clone number)
 
-        # Derive video path
-        video_file = f'{date}_batch{batch_no}_plate{plate_no}_well{well_no}.avi'
-        print("Video file currently analyzed:")
-        print(video_file)
-        video_path = os.path.join(data_dir, video_file)
-        
-        # Calculate avg. number of organisms based on three frames of the video
-        count_df = wim.count_particles(video_path)      
-        
-        # Perform analysis of movement behavior
-        motion_df = wmm.perform_motion_analysis(video_path)
-                 
-        # Summarize treatments and date
-        tdata = {
-            'date': [date],
-            'batch': [batch_no],
-            'plate': [plate_no],
-            'well': [well_no],
-            'ac': [ac_no]
-        }
-        treat_df = pd.DataFrame(tdata)
-        
-        # Join, collect and store results
-        concatenated_df = pd.concat([treat_df, count_df, motion_df], axis=1) # horizontal concatenation
-        result_df = result_df.append(concatenated_df, ignore_index=True)
-    
-        # Save the updated results to the output file after each iteration of the inner loop
-        concatenated_df.to_csv(outpath, mode='a', index=False, header=not os.path.exists(os.path.join(main_dir, outfile)))
-        
-    
-    # Update date-variable
-    date += 1
+try:
+    treat_df = pd.read_csv(treat_path)
+except FileNotFoundError:
+    print(f"Error: Treatment file not found at {treat_path}")
+    exit()
 
-        
-        
+if os.path.exists(outpath):
+    os.remove(outpath)
+
+# Find all unique dates present in the data directory to search through
+# This makes the script more flexible than a fixed date range
+all_folders = [d for d in os.listdir(data_base_dir) if os.path.isdir(os.path.join(data_base_dir, d))]
+dates_in_data = sorted(list(set([folder.split('_')[0] for folder in all_folders])))
+
+print(f"Found data for dates: {dates_in_data}")
+
+# Iterate through each sample from the treatments file
+for index, row in treat_df.iterrows():
+    batch_no = row['batch']
+    plate_no = row['plate']
+    well_no = row['well']
+    
+    # Try to find a matching folder for any of the available dates
+    found_folder = False
+    for date_str in dates_in_data:
+        folder_name = f"{date_str}_plate{plate_no}_well{well_no}"
+        run_folder_path = os.path.join(data_base_dir, folder_name)
+
+        if os.path.isdir(run_folder_path):
+            print("\n" + "="*50)
+            print(f"Analyzing: {folder_name}")
+            print("="*50)
+            
+            # Perform analysis (FPS is now determined automatically inside the functions)
+            count_df = wim.count_particles(run_folder_path)
+            motion_df = wmm.perform_motion_analysis(run_folder_path)
+            
+            # Create a DataFrame for the current row's data
+            current_row_df = row.to_frame().T
+            # Add the date to the row for completeness
+            current_row_df['date'] = date_str
+            
+            # Join results
+            concatenated_df = pd.concat([current_row_df.reset_index(drop=True), count_df, motion_df], axis=1)
+            
+            # Save results iteratively
+            header = not os.path.exists(outpath)
+            concatenated_df.to_csv(outpath, mode='a', index=False, header=header)
+            
+            found_folder = True
+            break # Move to the next well in the treatment file
+    
+    if not found_folder:
+        print(f"Warning: No data folder found for batch {batch_no}, plate {plate_no}, well {well_no} on any available date.")
+
+print("\nAnalysis complete. Results saved to:", outpath)

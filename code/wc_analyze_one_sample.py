@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Script: wc_analyze_one_sample
+Script: wc_analyze_one_sample (Modified for FPS-in-Filename)
 
 This software is part of the following publication:
 "Wellcounter: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates"
@@ -9,21 +9,17 @@ Methods in Ecology and Evolution
 The latest version can be found at https://github.com/cpstelzer/wellcounter
 
 Description:
-This script can be used to count microorganisms and analyze their swimming behavior
-based on a single mp4-movie. 
+This script counts microorganisms and analyzes their swimming behavior
+from a single sample's image sequence. The FPS is automatically detected
+from the image filenames.
 
-This script calls several functions of the wellcounter imaging and motion module.
-
-To use this script, follow these steps:
-1) Copy your mp4-file to the location specified in 'data_dir' (see below)
-2) Enter the name of the video file as 'video_file'
-3) To execute this script:
-    activate the required conda environment by "conda activate wellcount6"
-    in te wellcount6 env, type "python wc_analyze_one_sample.py"
+To use this script:
+1) Enter the path to the folder containing the image sequence below.
+2) Execute the script.
 
 Author: Claus-Peter Stelzer
 Date: 2025-02-07
-
+Modification Date: 2025-09-22
 """
 
 import os
@@ -31,20 +27,28 @@ import pandas as pd
 import wellcounter_imaging_module as wim
 import wellcounter_motion_module as wmm
 
-# Enter the path to the to be analyzed
-data_dir = "D:/popgrowth_20250627"  # Location of video file
-video_file = "20250702_batch1_plate37_well6.avi" # name of video file
-video_path = os.path.join(data_dir, video_file)
-
-# Calculate avg. number of organisms based on three frames of the video
-count_df = wim.count_particles(video_path)     
-
-# Perform motion analysis
-motion_df = wmm.perform_motion_analysis(video_path)        # Remove comment to activate motion analysis
-
-# Print the results
-print("Analysis of ", video_file, "complete:")
-print(count_df) 
-print(motion_df)                                           # Remove comment to activate motion analysis
+# --- Configuration ---
+# Enter the full path to the folder containing the image sequence
+run_folder_path = "C:/wellcounter/test/20250922_plate42_well6/"
 
 
+# --- Analysis ---
+if not os.path.isdir(run_folder_path):
+    print(f"Error: The specified folder does not exist: {run_folder_path}")
+else:
+    # FPS is determined automatically by the modules
+    
+    # Calculate avg. number of organisms
+    count_df = wim.count_particles(run_folder_path)
+
+    # Perform motion analysis
+    motion_df = wmm.perform_motion_analysis(run_folder_path)
+
+    # Print the results
+    print("\n" + "="*40)
+    print("Analysis of", os.path.basename(run_folder_path), "complete:")
+    print("="*40)
+    print("\nParticle Count Results:")
+    print(count_df)
+    print("\nMotion Analysis Results:")
+    print(motion_df)

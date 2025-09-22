@@ -1,0 +1,31 @@
+# Configuration for wc_record_experiment.py
+
+# --- File Paths ---
+paths:
+  # Base directory where all the well-specific folders will be created.
+  output_folder_base: "C:/wellcounter/test/"
+  
+  # Name of the detailed metadata log file created inside each well's folder.
+  log_filename: "metadata_log.csv"
+  
+  # Name of the high-level summary log for the entire experiment.
+  experiment_summary_log_filename: "experiment_summary_log.csv"
+
+# --- Acquisition Parameters ---
+acquisition:
+  # Duration of the image sequence recording for each well (in seconds).
+  duration_sec: 15
+  
+  # Target frames per second for the camera.
+  fps: 25.0
+  
+  # Camera exposure time in microseconds.
+  exposure_us: 15000
+
+# --- Output Settings ---
+output:
+  # Format for saved images.
+  # "png": (Default & Recommended) Lossless compression, good balance of size and quality.
+  # "bmp": Fastest for saving, but creates very large files (use for max FPS if 'png' causes issues).
+  # "jpg": Lossy compression, small files, but image quality is degraded.
+  image_format: "png"
