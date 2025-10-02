@@ -50,7 +50,7 @@ ser.port = 'COM9'
 portName = "COM4"
 relayNum = "1"
 numato = serial.Serial(portName, 19200, timeout=1)
-command_delay = 3
+command_delay = 0.5
 speed = 1.6
 acceleration = 1
 prev_position = (0, 0)
@@ -255,11 +255,11 @@ def main(csv_file, batch, config):
                     os.makedirs(run_folder_path, exist_ok=True)
                     
                     move_to_position(x, y)
-                    time.sleep(5)
+                    time.sleep(0.5)
                     
                     numato.write(f"relay on {relayNum}\n\r".encode())
                     print(f"Relay {relayNum} is ON")
-                    time.sleep(1)
+                    time.sleep(0.1)
                     
                     results = acquire_and_save_frames(executor, config, run_folder_path, current_date_str, plate, well)
                     
@@ -268,7 +268,7 @@ def main(csv_file, batch, config):
                     
                     append_to_summary_log(summary_log_path, batch, plate, well, results, run_folder_path)
 
-            move_to_position(0, 0)
+            move_to_position(-0.02, -0.75) # drift-compensated origin
 
         except Exception as e:
             print(f"An error occurred in the main loop: {e}")
@@ -288,7 +288,7 @@ def main(csv_file, batch, config):
 if __name__ == "__main__":
     try:
         config = load_config()
-        csv_file = "C:/CodeLab/wellcounter/code/wellpositions_one.csv"
+        csv_file = "C:/CodeLab/wellcounter/code/wellpositions_all_driftcompensated.csv"
         batch = int(input("Enter the batch number: "))
         user_input = input("Please ensure that:\n"
                       "1) Plates are in their correct positions, and lids have been removed\n"
