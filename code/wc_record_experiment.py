@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Wellcounter acquisition module (Modified Version 2)
+Wellcounter acquisition module (Modified Version 8, only 3 frames saved)
 
 This software is part of the following publication:
 "Wellcounter: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates"
@@ -10,24 +10,16 @@ The latest version can be found at https://github.com/cpstelzer/wellcounter
 
 Description:
 This script automates the process of recording experimental data with the WELLCOUNTER.
-This modified version incorporates modern data handling features inspired by the
-Wellscanner system:
-
-1.  **Configuration via YAML**: Key parameters are loaded from `wc_config.yaml`.
-2.  **Individual Frame Storage**: Saves a sequence of individual image frames.
-3.  **Organized Folder Structure**: Each well is saved in a dedicated folder.
-4.  **Self-Contained Metadata**: The FPS setting is embedded directly into each
-    image's filename (e.g., ..._f00001_fps25.png).
-5.  **Asynchronous Saving**: Uses a ThreadPoolExecutor for high-performance,
-    non-blocking image saving.
-6.  **Comprehensive Metadata Logging**: Creates detailed per-well and summary logs.
-
-Dependencies: csv, serial, time, cv2, os, pypylon, datetime, math, pandas, yaml, concurrent.futures
+This modified version incorporates:
+- Configuration via YAML
+- Organized folder structure
+- Batch number integrated into folder and file names
+- Frame grabbing for the full duration
+- **NEW: Save only 3 frames (first, middle, last) instead of all frames**
 
 Author: Claus-Peter Stelzer
 Date: 2025-02-07
-Modification Date: 2025-09-22
-
+Modification Date: 2025-10-02
 """
 
 import csv
@@ -70,7 +62,7 @@ def load_config(config_path="wc_record_config.yaml"):
         print(f"FATAL ERROR: Failed to parse configuration file: {e}")
         exit(1)
 
-# --- XY Table Control Functions (Unchanged) ---
+# --- XY Table Control Functions ---
 def send_gcode_command(command):
     ser.write(command.encode('utf-8'))
     ser.readline()
@@ -93,8 +85,8 @@ def move_to_position(x, y):
     time.sleep(2)
 
 # --- Core Acquisition and Saving Function ---
-def acquire_and_save_frames(executor, config, run_folder_path, current_date_str, plate, well):
-    print(f"--- Starting Frame Acquisition for Plate {plate}, Well {well} ---")
+def acquire_and_save_frames(executor, config, run_folder_path, current_date_str, batch, plate, well):
+    print(f"--- Starting Frame Acquisition for Batch {batch}, Plate {plate}, Well {well} ---")
     print(f"Outputting to folder: {run_folder_path}")
 
     duration = config['acquisition']['duration_sec']
@@ -102,16 +94,12 @@ def acquire_and_save_frames(executor, config, run_folder_path, current_date_str,
     exposure = config['acquisition']['exposure_us']
     total_frames_to_record = int(duration * fps)
     
-    output_format = config['output']['image_format'].lower()
-    if output_format not in ['bmp', 'jpg']:
-        output_format = 'png'
-    print(f"Saving frames as '.{output_format}'")
+    # Force PNG output
+    output_format = 'png'
+    print(f"Recording {total_frames_to_record} frames, but saving only 3 (.{output_format})")
 
-    log_fieldnames = [
-        "timestamp", "frame_count", "pylon_frame_id",
-        "frame_grab_time_ms", "image_save_submit_time_ms",
-        "total_loop_iteration_time_ms", "output_filename"
-    ]
+    # Decide which frames to save: first, middle, last
+    save_indices = {0, total_frames_to_record // 2, total_frames_to_record - 1}
     log_data = []
     
     camera = None
@@ -120,10 +108,9 @@ def acquire_and_save_frames(executor, config, run_folder_path, current_date_str,
         camera.Open()
         camera.ExposureTime.SetValue(exposure)
         
-        print(f"Attempting to acquire {total_frames_to_record} frames over {duration}s at {fps} FPS...")
+        print(f"Acquiring {total_frames_to_record} frames over {duration}s at {fps} FPS...")
         camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
         
-        start_acquisition_time = time.perf_counter()
         futures = {}
 
         for frame_count in range(total_frames_to_record):
@@ -141,24 +128,24 @@ def acquire_and_save_frames(executor, config, run_folder_path, current_date_str,
                     frame_image = grabResult.Array
                     pylon_frame_id = grabResult.GetBlockID() if hasattr(grabResult, "GetBlockID") else "N/A"
                     
-                    # --- FILENAME CHANGE ---
-                    # Embed the FPS setting directly into the filename.
-                    img_filename = (f"{current_date_str}_plate{plate}_well{well}_"
-                                    f"f{frame_count:05d}_fps{int(fps)}.{output_format}")
-                    # --- END OF CHANGE ---
+                    if frame_count in save_indices:
+                        img_filename = (f"{current_date_str}_batch{batch}_plate{plate}_well{well}_"
+                                        f"f{frame_count:05d}_fps{int(fps)}.{output_format}")
+                        output_path = os.path.join(run_folder_path, img_filename)
 
-                    output_path = os.path.join(run_folder_path, img_filename)
+                        future = executor.submit(
+                            cv2.imwrite, output_path, frame_image,
+                            [cv2.IMWRITE_PNG_COMPRESSION, 1]
+                        )
+                        futures[future] = output_path
 
-                    save_submit_start_time = time.perf_counter()
-                    future = executor.submit(cv2.imwrite, output_path, frame_image)
-                    futures[future] = output_path
-                    save_submit_end_time = time.perf_counter()
-
+                        log_entry["output_filename"] = output_path
+                    else:
+                        log_entry["output_filename"] = "discarded"
+                    
                     log_entry["timestamp"] = datetime.now().isoformat()
                     log_entry["frame_count"] = frame_count
                     log_entry["pylon_frame_id"] = pylon_frame_id
-                    log_entry["image_save_submit_time_ms"] = (save_submit_end_time - save_submit_start_time) * 1000
-                    log_entry["output_filename"] = output_path
                 else:
                     print(f"Frame {frame_count} grab failed: {grabResult.GetErrorDescription()}")
             
@@ -180,7 +167,7 @@ def acquire_and_save_frames(executor, config, run_folder_path, current_date_str,
             except Exception as e:
                 print(f"ERROR saving frame {futures[future]}: {e}")
                 error_count += 1
-        print(f"Successfully saved {saved_count} frames with {error_count} errors.")
+        print(f"Successfully saved {saved_count} frames (expected 3) with {error_count} errors.")
 
         log_file_path = os.path.join(run_folder_path, config['paths']['log_filename'])
         pd.DataFrame(log_data).to_csv(log_file_path, index=False)
@@ -232,7 +219,7 @@ def main(csv_file, batch, config):
     summary_log_path = os.path.join(base_output_dir, config['paths']['experiment_summary_log_filename'])
     initialize_summary_log(summary_log_path)
 
-    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+    with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
         try:
             ser.open()
             ser.readline()
@@ -248,9 +235,9 @@ def main(csv_file, batch, config):
                     plate, well, originX, originY = row
                     x, y = float(originX), float(originY)
                     
-                    print(f"\n================ PROCESSING PLATE: {plate}, WELL: {well} ================")
+                    print(f"\n================ PROCESSING BATCH {batch}, PLATE: {plate}, WELL: {well} ================")
                     
-                    run_folder_name = f"{current_date_str}_plate{plate}_well{well}"
+                    run_folder_name = f"{current_date_str}_batch{batch}_plate{plate}_well{well}"
                     run_folder_path = os.path.join(base_output_dir, run_folder_name)
                     os.makedirs(run_folder_path, exist_ok=True)
                     
@@ -261,7 +248,7 @@ def main(csv_file, batch, config):
                     print(f"Relay {relayNum} is ON")
                     time.sleep(0.1)
                     
-                    results = acquire_and_save_frames(executor, config, run_folder_path, current_date_str, plate, well)
+                    results = acquire_and_save_frames(executor, config, run_folder_path, current_date_str, batch, plate, well)
                     
                     numato.write(f"relay off {relayNum}\n\r".encode())
                     print(f"Relay {relayNum} is OFF")

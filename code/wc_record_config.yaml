@@ -14,7 +14,7 @@ paths:
 # --- Acquisition Parameters ---
 acquisition:
   # Duration of the image sequence recording for each well (in seconds).
-  duration_sec: 15
+  duration_sec: 7
   
   # Target frames per second for the camera.
   fps: 25.0
