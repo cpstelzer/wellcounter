@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Wellcounter acquisition module (Modified Version 8, only 3 frames saved)
+Wellcounter acquisition module (Modified Version 10, dual saving: PNG + JPEG)
 
 This software is part of the following publication:
 "Wellcounter: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates"
@@ -14,8 +14,9 @@ This modified version incorporates:
 - Configuration via YAML
 - Organized folder structure
 - Batch number integrated into folder and file names
-- Frame grabbing for the full duration
-- **NEW: Save only 3 frames (first, middle, last) instead of all frames**
+- Option in config: save_mode = "full" | "sample3"
+- PNG reference images (few or all, depending on save_mode)
+- JPEG export of *all frames* into subfolder (parallelized)
 
 Author: Claus-Peter Stelzer
 Date: 2025-02-07
@@ -93,15 +94,28 @@ def acquire_and_save_frames(executor, config, run_folder_path, current_date_str,
     fps = config['acquisition']['fps']
     exposure = config['acquisition']['exposure_us']
     total_frames_to_record = int(duration * fps)
-    
-    # Force PNG output
-    output_format = 'png'
-    print(f"Recording {total_frames_to_record} frames, but saving only 3 (.{output_format})")
 
-    # Decide which frames to save: first, middle, last
-    save_indices = {0, total_frames_to_record // 2, total_frames_to_record - 1}
+    save_mode = config['output'].get('save_mode', 'full')
+    png_compression = config['output'].get('png_compression', 1)
+    save_jpg = config['output'].get('save_jpg', False)
+    jpg_quality = config['output'].get('jpg_quality', 90)
+    jpg_subfolder = config['output'].get('jpg_subfolder', 'jpg')
+
+    # Ensure JPEG subfolder exists
+    jpg_folder_path = os.path.join(run_folder_path, jpg_subfolder)
+    if save_jpg:
+        os.makedirs(jpg_folder_path, exist_ok=True)
+
+    print(f"Recording {total_frames_to_record} frames, mode: {save_mode}, "
+          f"PNG refs + {'JPEG for all' if save_jpg else 'no JPEG'}")
+
+    # Determine which frames to save as PNG
+    if save_mode == "sample3":
+        save_indices = {0, total_frames_to_record // 2, total_frames_to_record - 1}
+    else:
+        save_indices = set(range(total_frames_to_record))  # all frames
+
     log_data = []
-    
     camera = None
     try:
         camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
@@ -127,22 +141,37 @@ def acquire_and_save_frames(executor, config, run_folder_path, current_date_str,
                 if grabResult.GrabSucceeded():
                     frame_image = grabResult.Array
                     pylon_frame_id = grabResult.GetBlockID() if hasattr(grabResult, "GetBlockID") else "N/A"
-                    
+
+                    # Build base filename (no extension)
+                    base_filename = (f"{current_date_str}_batch{batch}_plate{plate}_well{well}_"
+                                     f"f{frame_count:05d}_fps{int(fps)}")
+
+                    # --- PNG saving (only selected frames) ---
                     if frame_count in save_indices:
-                        img_filename = (f"{current_date_str}_batch{batch}_plate{plate}_well{well}_"
-                                        f"f{frame_count:05d}_fps{int(fps)}.{output_format}")
-                        output_path = os.path.join(run_folder_path, img_filename)
-
+                        png_filename = base_filename + ".png"
+                        png_path = os.path.join(run_folder_path, png_filename)
                         future = executor.submit(
-                            cv2.imwrite, output_path, frame_image,
-                            [cv2.IMWRITE_PNG_COMPRESSION, 1]
+                            cv2.imwrite, png_path, frame_image,
+                            [cv2.IMWRITE_PNG_COMPRESSION, png_compression]
                         )
-                        futures[future] = output_path
-
-                        log_entry["output_filename"] = output_path
+                        futures[future] = png_path
+                        log_entry["png_output"] = png_path
                     else:
-                        log_entry["output_filename"] = "discarded"
-                    
+                        log_entry["png_output"] = "discarded"
+
+                    # --- JPEG saving (all frames, if enabled) ---
+                    if save_jpg:
+                        jpg_filename = base_filename + ".jpg"
+                        jpg_path = os.path.join(jpg_folder_path, jpg_filename)
+                        future = executor.submit(
+                            cv2.imwrite, jpg_path, frame_image,
+                            [cv2.IMWRITE_JPEG_QUALITY, jpg_quality]
+                        )
+                        futures[future] = jpg_path
+                        log_entry["jpg_output"] = jpg_path
+                    else:
+                        log_entry["jpg_output"] = "disabled"
+
                     log_entry["timestamp"] = datetime.now().isoformat()
                     log_entry["frame_count"] = frame_count
                     log_entry["pylon_frame_id"] = pylon_frame_id
@@ -167,7 +196,7 @@ def acquire_and_save_frames(executor, config, run_folder_path, current_date_str,
             except Exception as e:
                 print(f"ERROR saving frame {futures[future]}: {e}")
                 error_count += 1
-        print(f"Successfully saved {saved_count} frames (expected 3) with {error_count} errors.")
+        print(f"Successfully saved {saved_count} image files with {error_count} errors.")
 
         log_file_path = os.path.join(run_folder_path, config['paths']['log_filename'])
         pd.DataFrame(log_data).to_csv(log_file_path, index=False)

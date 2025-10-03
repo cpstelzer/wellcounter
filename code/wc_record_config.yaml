@@ -24,8 +24,9 @@ acquisition:
 
 # --- Output Settings ---
 output:
-  # Format for saved images.
-  # "png": (Default & Recommended) Lossless compression, good balance of size and quality.
-  # "bmp": Fastest for saving, but creates very large files (use for max FPS if 'png' causes issues).
-  # "jpg": Lossy compression, small files, but image quality is degraded.
-  image_format: "png"
+  save_mode: sample3     # options: "full" (save all frames) | "sample3" (first, middle, last)
+  image_format: png      # enforced as png for reference frames
+  png_compression: 1     # 0-9 (lower = faster, larger files)
+  save_jpg: true         # if true, save all frames also as JPEG
+  jpg_quality: 85        # JPEG quality (1–100, higher = better/larger)
+  jpg_subfolder: jpg     # subfolder name for JPEG export
