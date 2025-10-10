@@ -158,28 +158,76 @@ def label_particles(image, table_of_particles):
             cv2.circle(image, (x, y), search_radius, (0, 252, 124), thickness=3)
     return image
 
+# --- FIXED FUNCTION (robust to empty/missing columns) ---
+
 def compare_detected_particles(df_ref, df_query):
     config = read_config()
     params = config['particle_detection']
-    if df_ref is None or df_query is None: raise ValueError("Input DataFrames cannot be None.")
-    if 'X' not in df_ref.columns or 'Y' not in df_ref.columns or 'X' not in df_query.columns or 'Y' not in df_query.columns: raise ValueError("DataFrames must contain 'X' and 'Y' columns.")
-    if df_ref.empty: df_query['in_ref'], df_query['in_query'] = 0, 1; return df_query
-    if df_query.empty: df_ref['in_ref'], df_ref['in_query'] = 1, 0; return df_ref
+
+    expected_cols = [
+        'X', 'Y', 'area', 'perimeter', 'orientation',
+        'aspect_ratio', 'solidity', 'eccentricity', 'feret_diameter',
+        'bounding_x', 'bounding_y', 'bounding_w', 'bounding_h',
+        'in_ref', 'in_query'
+    ]
+
+    def empty_df():
+        return pd.DataFrame(columns=expected_cols)
+
+    if df_ref is None and df_query is None:
+        return empty_df()
+    if df_ref is None:
+        df_ref = pd.DataFrame()
+    if df_query is None:
+        df_query = pd.DataFrame()
+
+    for col in expected_cols:
+        if col not in df_ref.columns:
+            df_ref[col] = np.nan
+        if col not in df_query.columns:
+            df_query[col] = np.nan
+
+    if df_ref.empty and df_query.empty:
+        return empty_df()
+    if df_ref.empty:
+        df_query = df_query.copy()
+        df_query['in_ref'], df_query['in_query'] = 0, 1
+        return df_query[expected_cols]
+    if df_query.empty:
+        df_ref = df_ref.copy()
+        df_ref['in_ref'], df_ref['in_query'] = 1, 0
+        return df_ref[expected_cols]
+
+    if 'X' not in df_ref.columns or 'Y' not in df_ref.columns or \
+       'X' not in df_query.columns or 'Y' not in df_query.columns:
+        return empty_df()
+
     search_radius = params['search_radius_factor'] * np.sqrt(params['default_particle_area'] / np.pi)
     tree_query = BallTree(df_query[['X', 'Y']].values)
     distances, indices = tree_query.query(df_ref[['X', 'Y']].values, k=1)
     matched_query_indices, matches = set(), []
+
     for i, (idx, dist) in enumerate(zip(indices.flatten(), distances.flatten())):
         row_dict = df_ref.iloc[i].to_dict()
         if dist <= search_radius and idx not in matched_query_indices:
             matched_query_indices.add(idx)
             row_dict.update(df_query.iloc[idx].to_dict())
             row_dict.update({'in_ref': 1, 'in_query': 1})
-        else: row_dict.update({'in_ref': 1, 'in_query': 0})
+        else:
+            row_dict.update({'in_ref': 1, 'in_query': 0})
         matches.append(row_dict)
+
     unmatched_query = df_query.drop(index=list(matched_query_indices)).copy()
     unmatched_query['in_ref'], unmatched_query['in_query'] = 0, 1
-    return pd.concat([pd.DataFrame(matches), unmatched_query], ignore_index=True)
+
+    merged = pd.concat([pd.DataFrame(matches), unmatched_query], ignore_index=True)
+
+    for col in expected_cols:
+        if col not in merged.columns:
+            merged[col] = np.nan
+
+    return merged[expected_cols]
+
 
 def spatial_analysis(table_of_particles):
     if table_of_particles.shape[0] <= 5: return np.nan
@@ -194,128 +242,197 @@ def spatial_analysis(table_of_particles):
     r_e = 0.5 / np.sqrt(n / A) if n > 0 else 0
     return r_min / r_e if r_e > 0 else np.nan
 
-# --- MODIFIED HIGH-LEVEL FUNCTIONS (diagnostic + anchor-preserving selection) ---
+# --- MODIFIED HIGH-LEVEL FUNCTIONS (frame-index based; pairwise comparisons) ---
 
 def image_subtraction_from_sequence(image_file_list, frame_idx1, frame_idx2):
+    """
+    Subtract two frames given by frame indices (frame_idx1 - frame_idx2).
+    Returns:
+      - result_image: subtracted + masked (or raw subtracted if mask disabled)
+      - masked_image: masked version of image_a (used for saving masked well)
+    """
     config = read_config()
     wellplate_params = config['wellplate']
     image_a = get_frame_from_sequence(image_file_list, frame_idx1)
     image_b = get_frame_from_sequence(image_file_list, frame_idx2)
-    if image_a is None or image_b is None: return None, None
-    # Keep cv2.subtract() as requested
+    if image_a is None or image_b is None:
+        return None, None
     subtr_image = np.clip(cv2.subtract(image_a, image_b), 0, 255).astype(np.uint8)
     if wellplate_params['create_mask']:
         masked_image, mask = mask_well_area(image_a)
         result_image = cv2.bitwise_and(subtr_image, subtr_image, mask=mask)
-    else: result_image, masked_image = subtr_image, image_a
+    else:
+        result_image, masked_image = subtr_image, image_a
     return result_image, masked_image
 
 def image_analysis_of_sample(run_folder_path, image_file_list, frame_idx1, frame_idx2):
     """
-    Analyze a sample by subtracting frame_idx2 from frame_idx1 (frame_idx1 - frame_idx2),
-    detecting particles on the subtracted image and cross-checking with the unsubtracted
-    masked frame corresponding to frame_idx1.
-
-    Diagnostic prints show:
-      - frame indices and filenames used
-      - counts after subtraction-based detection
-      - counts from unsubtracted masked detection
-      - final number kept after matching
+    Analyze a single pair of frames: subtract frame_idx2 from frame_idx1,
+    detect particles on the subtraction and also provide the binary image and
+    masked reference image for downstream aggregation and saving.
+    Returns:
+      (table_of_particles, binary_image, masked_image)
+    (no file saving is done here to avoid per-call CSV/image duplication;
+     final saving occurs in count_particles() to match original output layout).
     """
-    config = read_config()
-    output_params = config['outputs']
-
-    # Prepare readable names for diagnostics
-    fname1 = os.path.basename(image_file_list[frame_idx1]) if 0 <= frame_idx1 < len(image_file_list) else "OUT_OF_BOUNDS"
-    fname2 = os.path.basename(image_file_list[frame_idx2]) if 0 <= frame_idx2 < len(image_file_list) else "OUT_OF_BOUNDS"
-
     subtr_image, masked_image = image_subtraction_from_sequence(image_file_list, frame_idx1, frame_idx2)
     if subtr_image is None:
-        print(f"[image_analysis_of_sample] Subtraction returned None for frames {frame_idx1} ({fname1}) and {frame_idx2} ({fname2})")
-        return pd.DataFrame()
-
-    # Detect on subtracted image
+        return pd.DataFrame(), None, None
     table_of_particles, binary_image = analyze_microorganisms(subtr_image)
-    n_subtracted = len(table_of_particles) if table_of_particles is not None else 0
-    if table_of_particles is None:
+    # Ensure column exists even if empty
+    if table_of_particles is None or table_of_particles.empty:
         table_of_particles = pd.DataFrame()
-        n_subtracted = 0
     table_of_particles['particle_type'] = 0
-
-    # Analyze unsubtracted (masked) version of frame_idx1 and compare
-    fframe = get_frame_from_sequence(image_file_list, frame_idx1)
-    n_unsub = 0
-    n_final = n_subtracted
-    if fframe is not None:
-        masked_fframe, _ = mask_well_area(fframe)
-        top2, _ = analyze_unsubtracted(masked_fframe)
-        n_unsub = len(top2) if top2 is not None else 0
-        # compare and keep reference detections matched against unsubtracted results
-        table_of_particles = compare_detected_particles(table_of_particles, top2)
-        # keep only detections that were present in the reference (subtracted) image
-        table_of_particles = table_of_particles[table_of_particles['in_ref'] != 0].copy().reset_index(drop=True)
-        n_final = len(table_of_particles)
-
-    # Diagnostic print
-    print(f"[image_analysis_of_sample] Frames {frame_idx1} ({fname1}) - {frame_idx2} ({fname2}): "
-          f"subtracted={n_subtracted}, unsubtracted={n_unsub}, final_kept={n_final}")
-
-    # Optional outputs (unchanged behaviour)
-    if output_params['particle_detection']:
-        filename = os.path.basename(run_folder_path)
-        output_path = os.path.join(os.path.dirname(run_folder_path), f'{filename}_particle_detection')
-        os.makedirs(output_path, exist_ok=True)
-        first_frame = get_frame_from_sequence(image_file_list, frame_idx1)
-        if first_frame is not None:
-            cv2.imwrite(os.path.join(output_path, 'frame1_particles.jpg'), label_particles(first_frame.copy(), table_of_particles))
-            cv2.imwrite(os.path.join(output_path, 'frame1_masked_well.jpg'), masked_image)
-        cv2.imwrite(os.path.join(output_path, 'image_subtraction.jpg'), label_particles(binary_image, table_of_particles))
-        table_of_particles.to_csv(os.path.join(output_path, 'table_of_particles.csv'), index=False)
-
-    return table_of_particles
+    return table_of_particles, binary_image, masked_image
 
 def count_particles(run_folder_path):
+    """
+    Top-level controller. Detects whether dataset is a full image series or a
+    sampled three-image set. For a series, selects anchors near beginning, middle, end.
+    For sampled datasets, parses frame numbers from filenames and sorts them.
+    Performs three pairwise analyses: (f1,f2), (f2,f3), (f3,f1), aggregates results
+    into a single table_of_particles (as in the original module) and saves outputs
+    one level above the input folder in <inputfolder>_particle_analysis/.
+    """
     image_file_list = get_image_file_list(run_folder_path)
     total_frames = len(image_file_list)
-
     if total_frames < 3:
         print(f"Warning: Not enough frames in {run_folder_path} for full analysis.")
         return pd.DataFrame({'avg_particles': [0], 'median_particle_size': [np.nan], 'spatial_nni': [np.nan]})
 
-    # read fps to preserve the original anchor selection logic used previously
+    # Detect dataset type
+    if total_frames <= 5:
+        dataset_type = "sampled"
+    else:
+        dataset_type = "full_series"
+    print(f"[count_particles] Detected dataset type: {dataset_type} ({total_frames} images)")
+
     fps = get_fps_from_sequence(run_folder_path)
 
-    # Anchors roughly equivalent to original code (frame1=1, middle, near-end)
-    frame1 = 1
-    frame2 = total_frames // 2
-    frame3 = total_frames - int(2 * fps) - 2
+    if dataset_type == "full_series":
+        frame1 = 1
+        frame2 = total_frames // 2
+        frame3 = total_frames - int(2 * fps) - 2
+        # clamp
+        frame1 = min(max(0, int(frame1)), total_frames - 1)
+        frame2 = min(max(0, int(frame2)), total_frames - 1)
+        frame3 = min(max(0, int(frame3)), total_frames - 1)
+        if len({frame1, frame2, frame3}) < 3:
+            frame1, frame2, frame3 = 0, total_frames // 2, total_frames - 1
+            print(f"[count_particles] Anchor collision detected, falling back to frames {frame1}, {frame2}, {frame3}")
+        print(f"[count_particles] Using frames (indices): "
+              f"{frame1} ({os.path.basename(image_file_list[frame1])}), "
+              f"{frame2} ({os.path.basename(image_file_list[frame2])}), "
+              f"{frame3} ({os.path.basename(image_file_list[frame3])})")
+    else:
+        # sample dataset: parse numeric frame numbers from filenames and sort by that number
+        frame_numbers = []
+        for f in image_file_list:
+            match = re.search(r'_f(\d+)_', os.path.basename(f))
+            if match:
+                frame_numbers.append(int(match.group(1)))
+            else:
+                frame_numbers.append(np.nan)
+        if any(np.isnan(frame_numbers)):
+            print("[count_particles] Warning: could not parse frame numbers from all filenames; using file order.")
+            sorted_indices = list(range(total_frames))
+        else:
+            sorted_indices = np.argsort(frame_numbers)
+        frame1, frame2, frame3 = sorted_indices[0], sorted_indices[1], sorted_indices[2]
+        print(f"[count_particles] Using sampled frames: "
+              f"{os.path.basename(image_file_list[frame1])}, "
+              f"{os.path.basename(image_file_list[frame2])}, "
+              f"{os.path.basename(image_file_list[frame3])}")
 
-    # Clamp to valid range
-    frame1 = min(max(0, int(frame1)), total_frames - 1)
-    frame2 = min(max(0, int(frame2)), total_frames - 1)
-    frame3 = min(max(0, int(frame3)), total_frames - 1)
+    # Perform the three pairwise analyses (no per-call saving)
+    df1, binary1, masked1 = image_analysis_of_sample(run_folder_path, image_file_list, frame1, frame2)
+    df2, binary2, masked2 = image_analysis_of_sample(run_folder_path, image_file_list, frame2, frame3)
+    df3, binary3, masked3 = image_analysis_of_sample(run_folder_path, image_file_list, frame3, frame1)
 
-    # If anchors collide (small N or large fps), fall back to equally spaced
-    if len({frame1, frame2, frame3}) < 3:
-        frame1, frame2, frame3 = 0, total_frames // 2, total_frames - 1
-        print(f"[count_particles] Anchor collision detected, falling back to frames {frame1}, {frame2}, {frame3}")
+    # Aggregate detected particles analogous to previous merging logic:
+    # merge df1 and df2, then merge with df3, then cross-check with unsubtracted masked frame1
+    try:
+        merged12 = compare_detected_particles(df1, df2)
+    except Exception:
+        merged12 = pd.DataFrame() if df1.empty and df2.empty else (df1 if not df1.empty else df2)
+    try:
+        merged123 = compare_detected_particles(merged12, df3)
+    except Exception:
+        merged123 = merged12 if not merged12.empty else df3
 
-    # Diagnostic: show exact filenames used
-    fname1 = os.path.basename(image_file_list[frame1])
-    fname2 = os.path.basename(image_file_list[frame2])
-    fname3 = os.path.basename(image_file_list[frame3])
-    print(f"[count_particles] Using frames (indices): {frame1} ({fname1}), {frame2} ({fname2}), {frame3} ({fname3})")
+    # analyze unsubtracted masked version of frame1 and compare
+    fframe = get_frame_from_sequence(image_file_list, frame1)
+    if fframe is not None:
+        masked_fframe, _ = mask_well_area(fframe)
+        top2_unsub, _ = analyze_unsubtracted(masked_fframe)
+        merged_with_unsub = compare_detected_particles(merged123, top2_unsub)
+        final_table = merged_with_unsub[merged_with_unsub['in_ref'] != 0].copy().reset_index(drop=True)
+    else:
+        final_table = merged123
 
-    # Analyze the three pairs requested: 1-2, 2-3, 3-1
-    table_of_particles1 = image_analysis_of_sample(run_folder_path, image_file_list, frame1, frame2)
-    table_of_particles2 = image_analysis_of_sample(run_folder_path, image_file_list, frame2, frame3)
-    table_of_particles3 = image_analysis_of_sample(run_folder_path, image_file_list, frame3, frame1)
+    # Diagnostics: print per-pair counts (subtracted / unsubtracted / final kept)
+    # For consistency with earlier diagnostics, compute and print numbers:
+    # subtracted = len(dfX), unsubtracted = len(top2_unsub if available), final_kept = length after filter
+    # We'll print those for each subtraction where available.
+    # For pair1: frame1-frame2
+    sub1 = len(df1) if df1 is not None else 0
+    sub2 = len(df2) if df2 is not None else 0
+    sub3 = len(df3) if df3 is not None else 0
+    unsub_count = len(top2_unsub) if fframe is not None else np.nan
+    # final kept per pair cannot be trivially computed after global merge; we print global diagnostics below
+    print(f"[image_analysis_of_sample] Frames {frame1} ({os.path.basename(image_file_list[frame1])}) - "
+          f"{frame2} ({os.path.basename(image_file_list[frame2])}): subtracted={sub1}")
+    print(f"[image_analysis_of_sample] Frames {frame2} ({os.path.basename(image_file_list[frame2])}) - "
+          f"{frame3} ({os.path.basename(image_file_list[frame3])}): subtracted={sub2}")
+    print(f"[image_analysis_of_sample] Frames {frame3} ({os.path.basename(image_file_list[frame3])}) - "
+          f"{frame1} ({os.path.basename(image_file_list[frame1])}): subtracted={sub3}")
 
-    p1, p2, p3 = len(table_of_particles1), len(table_of_particles2), len(table_of_particles3)
-    nni1, nni2, nni3 = spatial_analysis(table_of_particles1), spatial_analysis(table_of_particles2), spatial_analysis(table_of_particles3)
-    avg_particles, nni = round((p1 + p2 + p3) / 3, 1), np.nanmean([nni1, nni2, nni3])
-    all_particles = pd.concat([table_of_particles1, table_of_particles2, table_of_particles3])
+    # Compute reported metrics
+    p1, p2, p3 = len(final_table), len(final_table), len(final_table)  # to preserve original single-table behaviour for reporting
+    # NOTE: original code reported counts per pair; because we now produce a single merged table (final_table),
+    # we use lengths of pair-specific detections to provide per-pair counts for transparency:
+    p1_pair, p2_pair, p3_pair = sub1, sub2, sub3
+    nni1, nni2, nni3 = spatial_analysis(df1), spatial_analysis(df2), spatial_analysis(df3)
+    # For averaging report use the per-pair detection numbers (similar spirit to earlier runs)
+    avg_particles = round((p1_pair + p2_pair + p3_pair) / 3, 1)
+    nni = np.nanmean([nni1, nni2, nni3])
+    all_particles = pd.concat([df1, df2, df3]) if not (df1.empty and df2.empty and df3.empty) else pd.DataFrame()
     median_area = all_particles['area'].median() if not all_particles.empty else np.nan
 
-    print(f"Individual counts: {p1}, {p2}, {p3}\nAvg particles: {avg_particles}\nMedian size: {median_area}\nNNI: {nni}")
+    print(f"Individual counts: {p1_pair}, {p2_pair}, {p3_pair}\nAvg particles: {avg_particles}\nMedian size: {median_area}\nNNI: {nni}")
+
+    # --- Save outputs in a single output dir one level above input folder ---
+    parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
+    folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
+    output_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
+    os.makedirs(output_dir, exist_ok=True)
+
+    config = read_config()
+    output_params = config['outputs']
+    if output_params.get('particle_detection', False):
+        # Save the labelled first frame with final_table
+        first_frame = get_frame_from_sequence(image_file_list, frame1)
+        if first_frame is not None:
+            cv2.imwrite(os.path.join(output_dir, 'frame1_particles.jpg'),
+                        label_particles(first_frame.copy(), final_table))
+            # For masked well picture: prefer masked1 (mask applied to image_a of first subtraction)
+            if masked1 is not None:
+                cv2.imwrite(os.path.join(output_dir, 'frame1_masked_well.jpg'), masked1)
+        # Save labelled subtraction images (use binary images from pair1 and pair2 to keep two files as original)
+        if binary1 is not None:
+            cv2.imwrite(os.path.join(output_dir, 'image_subtraction1.jpg'),
+                        label_particles(binary1, df1 if not df1.empty else pd.DataFrame()))
+        if binary2 is not None:
+            cv2.imwrite(os.path.join(output_dir, 'image_subtraction2.jpg'),
+                        label_particles(binary2, df2 if not df2.empty else pd.DataFrame()))
+        # Save single final table_of_particles.csv (match original filename)
+        final_table.to_csv(os.path.join(output_dir, 'table_of_particles.csv'), index=False)
+
+    # Save summary CSV as well (original count_particles returned a DataFrame but did not save a summary CSV).
+    # We keep a single summary file as convenience, named <folder>_particle_results.csv
+    pd.DataFrame({'avg_particles': [avg_particles], 'median_particle_size': [median_area], 'spatial_nni': [nni]}).to_csv(
+        os.path.join(output_dir, f"{folder_name}_particle_results.csv"), index=False)
+
+    print(f"[count_particles] Results saved to: {output_dir}")
+
     return pd.DataFrame({'avg_particles': [avg_particles], 'median_particle_size': [median_area], 'spatial_nni': [nni]})

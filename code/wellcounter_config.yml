@@ -13,15 +13,15 @@ optimize:
   threshold_to: 24
   training_path: C:/wellcounter/training_data_for_MEE
 outputs:
-  motion: true
+  motion: false
   particle_detection: true
 particle_detection:
   background_is_dark: true
   default_particle_area: 500
   filter_by_shape: false
   microorganism_blur: 5
-  microorganism_threshold: 8
-  min_microorganism_area: 300
+  microorganism_threshold: 24
+  min_microorganism_area: 210
   search_radius_factor: 2
   unsubtracted_threshold: 70
 system:

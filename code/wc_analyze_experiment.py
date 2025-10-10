@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Script: wc_analyze_experiment (Modified for FPS-in-Filename)
+Script: wc_analyze_experiment (Modified for FPS-in-Filename, multi-date support)
 
 This software is part of the following publication:
 "Wellcounter: Automated High-Throughput Phenotyping for Aquatic Microinvertebrates"
@@ -17,12 +17,13 @@ Requirements:
 2. A CSV file named '...treatments.csv' containing treatment information.
 
 Functionality:
-Iterates through each sample defined in the treatment file, finds the
-corresponding data folder, performs analysis, and combines the results.
+Iterates through each sample defined in the treatment file, finds all
+corresponding data folders across multiple dates, performs analysis for each,
+and combines the results into a single output file.
 
 Author: Claus-Peter Stelzer
 Date: 2025-02-07
-Modification Date: 2025-09-22
+Modification Date: 2025-10-09 (Revised multi-date iteration)
 """
 
 import os
@@ -32,10 +33,10 @@ import wellcounter_motion_module as wmm
 from datetime import datetime
 
 # --- Configuration ---
-main_dir = "D:/popgrowth_20250627/"
+main_dir = "D:/wellcounter/popgrowth_20251001"
 data_base_dir = os.path.join(main_dir, "image_sequences")
-treat_file = "popgrowth_20250627_treatments.csv"
-outfile = "popgrowth_20250627_results.csv"
+treat_file = "popgrowth_20251001_treatments.csv"
+outfile = "popgrowth_20251001_results.csv"
 
 # --- Main Analysis ---
 
@@ -51,50 +52,58 @@ except FileNotFoundError:
 if os.path.exists(outpath):
     os.remove(outpath)
 
-# Find all unique dates present in the data directory to search through
-# This makes the script more flexible than a fixed date range
+# Identify all date prefixes from existing data folders
 all_folders = [d for d in os.listdir(data_base_dir) if os.path.isdir(os.path.join(data_base_dir, d))]
 dates_in_data = sorted(list(set([folder.split('_')[0] for folder in all_folders])))
 
 print(f"Found data for dates: {dates_in_data}")
 
-# Iterate through each sample from the treatments file
+# --- Iterate through each sample in the treatment file ---
 for index, row in treat_df.iterrows():
     batch_no = row['batch']
     plate_no = row['plate']
     well_no = row['well']
-    
-    # Try to find a matching folder for any of the available dates
     found_folder = False
+
+    print("\n" + "-"*60)
+    print(f"Processing sample: batch={batch_no}, plate={plate_no}, well={well_no}")
+    print("-"*60)
+
+    # Check each date folder for matching samples
     for date_str in dates_in_data:
-        folder_name = f"{date_str}_plate{plate_no}_well{well_no}"
+        folder_name = f"{date_str}_batch{batch_no}_plate{plate_no}_well{well_no}"
         run_folder_path = os.path.join(data_base_dir, folder_name)
 
         if os.path.isdir(run_folder_path):
+            found_folder = True
             print("\n" + "="*50)
             print(f"Analyzing: {folder_name}")
             print("="*50)
-            
-            # Perform analysis (FPS is now determined automatically inside the functions)
-            count_df = wim.count_particles(run_folder_path)
-            motion_df = wmm.perform_motion_analysis(run_folder_path)
-            
-            # Create a DataFrame for the current row's data
-            current_row_df = row.to_frame().T
-            # Add the date to the row for completeness
-            current_row_df['date'] = date_str
-            
-            # Join results
-            concatenated_df = pd.concat([current_row_df.reset_index(drop=True), count_df, motion_df], axis=1)
-            
-            # Save results iteratively
-            header = not os.path.exists(outpath)
-            concatenated_df.to_csv(outpath, mode='a', index=False, header=header)
-            
-            found_folder = True
-            break # Move to the next well in the treatment file
-    
+
+            try:
+                # Perform image analysis
+                count_df = wim.count_particles(run_folder_path)
+                # Optional: motion analysis can be re-enabled if desired
+                # motion_df = wmm.perform_motion_analysis(run_folder_path)
+
+                # Combine treatment metadata with analysis results
+                current_row_df = row.to_frame().T
+                current_row_df['date'] = date_str
+
+                # Combine dataframes (without motion analysis)
+                concatenated_df = pd.concat(
+                    [current_row_df.reset_index(drop=True), count_df],
+                    axis=1
+                )
+
+                # Save results iteratively
+                header = not os.path.exists(outpath)
+                concatenated_df.to_csv(outpath, mode='a', index=False, header=header)
+
+            except Exception as e:
+                print(f"Error analyzing {folder_name}: {e}")
+
     if not found_folder:
-        print(f"Warning: No data folder found for batch {batch_no}, plate {plate_no}, well {well_no} on any available date.")
+        print(f"Warning: No data folders found for batch {batch_no}, plate {plate_no}, well {well_no} on any date.")
 
 print("\nAnalysis complete. Results saved to:", outpath)
