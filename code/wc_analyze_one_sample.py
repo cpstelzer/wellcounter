@@ -29,7 +29,7 @@ import wellcounter_motion_module as wmm
 
 # --- Configuration ---
 # Enter the full path to the folder containing the image sequence
-run_folder_path = "C:/wellcounter/test/20251007_batch1_plate1_well4/"
+run_folder_path = "C:/wellcounter/test/20251002_batch1_plate1_well1/"
 
 
 # --- Analysis ---

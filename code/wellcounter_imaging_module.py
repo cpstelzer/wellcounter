@@ -152,10 +152,6 @@ def mask_well_area(image):
     print(f"[mask_well_area] Center: {center}, radius: {radius}, "
           f"threshold_saved: {threshold is not None}", flush=True)
 
-    # Save the threshold for visual debugging to confirm whether contours exist
-    if threshold is not None:
-        cv2.imwrite("debug_threshold_refX.png", threshold)
-
     return result_image, mask
 
 
@@ -367,14 +363,20 @@ def count_particles(run_folder_path):
 
     print(f"[count_particles] Using frames (indices): {frame1_idx}, {frame2_idx}, {frame3_idx}")
 
-    # --- Save outputs (based on the FIRST analysis for consistency) ---
+    # --- Define output folder path (but don't create it yet) ---
     parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
     folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
     output_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
-    os.makedirs(output_dir, exist_ok=True)
+
+    config = read_config()
+    save_outputs = bool(config['outputs'].get('particle_detection', False))
+
+    if save_outputs:
+        os.makedirs(output_dir, exist_ok=True)
 
 
     # Helper function for a single, self-contained analysis 
+        # Helper function for a single, self-contained analysis 
     def run_single_analysis(ref_idx, sub1_idx, sub2_idx, output_dir):
         """
         Mirrors the logic of the master script's image_analysis_of_sample.
@@ -388,39 +390,34 @@ def count_particles(run_folder_path):
         # Merge the two subtraction results
         merged_subs = compare_detected_particles(df_sub1, df_sub2)
 
+        # Read the config once and decide whether to save
+        config = read_config()
+        save_outputs = bool(config['outputs'].get('particle_detection', False))
+
         # Analyze unsubtracted reference frame and compare
         ref_frame = get_frame_from_sequence(image_file_list, ref_idx)
-        final_table = merged_subs # Default if frame is unreadable
+        final_table = merged_subs  # Default if frame is unreadable
         if ref_frame is not None:
             masked_fframe, _ = mask_well_area(ref_frame)
-
-            #df_unsub, _ = analyze_unsubtracted(masked_fframe)
-
-            # --- START OF NEW DEBUG CODE ---
-            # 1. Capture the binary image from analyze_unsubtracted (instead of discarding with '_')
-                        
             df_unsub, binary_unsub = analyze_unsubtracted(masked_fframe)
-            
-            # 2. Add a safety check and save the captured binary image
-            if binary_unsub is not None:
-                debug_filename = f'debug_ref{ref_idx}_unsubtracted_binary.png'
-                cv2.imwrite(os.path.join(output_dir, debug_filename), binary_unsub)
 
-            if masked_fframe is not None:
-                debug_filename = f'debug_ref{ref_idx}_masked.png'
-                cv2.imwrite(os.path.join(output_dir, debug_filename), masked_fframe)
+            # Only save debug images if flag is True
+            if save_outputs:
+                os.makedirs(output_dir, exist_ok=True)
 
-            if ref_frame is not None:
-                debug_filename = f'debug_ref{ref_idx}_raw.png'
-                cv2.imwrite(os.path.join(output_dir, debug_filename), ref_frame)
-            # --- END OF NEW DEBUG CODE ---
+                if binary_unsub is not None:
+                    cv2.imwrite(os.path.join(output_dir, f'debug_ref{ref_idx}_unsubtracted_binary.png'), binary_unsub)
+                if masked_fframe is not None:
+                    cv2.imwrite(os.path.join(output_dir, f'debug_ref{ref_idx}_masked.png'), masked_fframe)
+                if ref_frame is not None:
+                    cv2.imwrite(os.path.join(output_dir, f'debug_ref{ref_idx}_raw.png'), ref_frame)
 
-            
             merged_with_unsub = compare_detected_particles(merged_subs, df_unsub)
             final_table = merged_with_unsub[merged_with_unsub['in_ref'] != 0].copy().reset_index(drop=True)
 
         print(f"[run_single_analysis] RefFrame {ref_idx}: Found {len(df_sub1)} (vs {sub1_idx}) and {len(df_sub2)} (vs {sub2_idx}) particles. Final count: {len(final_table)}")
         return final_table, bin1, bin2, masked_ref
+
 
     # Perform three INDEPENDENT analyses
     final_table1, binary1, binary2, masked1 = run_single_analysis(frame1_idx, frame2_idx, frame3_idx, output_dir)
@@ -445,10 +442,14 @@ def count_particles(run_folder_path):
 
     print(f"\nIndividual counts: {p1}, {p2}, {p3}\nAvg particles: {avg_particles}\nMedian size: {median_area}\nNNI: {nni}")
 
-    
+    # --- Output control ---
     config = read_config()
-    if config['outputs'].get('particle_detection', False):
-        # Save the labelled first frame using the results from the first analysis
+    save_outputs = bool(config['outputs'].get('particle_detection', False))
+
+    if save_outputs:
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Save particle-level outputs (as before)
         first_frame = get_frame_from_sequence(image_file_list, frame1_idx)
         if first_frame is not None:
             cv2.imwrite(os.path.join(output_dir, 'frame1_particles.jpg'),
@@ -456,21 +457,28 @@ def count_particles(run_folder_path):
             if masked1 is not None:
                 cv2.imwrite(os.path.join(output_dir, 'frame1_masked_well.jpg'), masked1)
 
-        # Save labelled subtraction images from the first analysis
         if binary1 is not None:
             cv2.imwrite(os.path.join(output_dir, 'image_subtraction1.jpg'),
                         label_particles(binary1, final_table1))
         if binary2 is not None:
             cv2.imwrite(os.path.join(output_dir, 'image_subtraction2.jpg'),
                         label_particles(binary2, final_table1))
-
-        # Save the particle table from the first analysis
         final_table1.to_csv(os.path.join(output_dir, 'table_of_particles.csv'), index=False)
 
-    # Save summary CSV with the final averaged metrics
-    pd.DataFrame({'avg_particles': [avg_particles], 'median_particle_size': [median_area], 'spatial_nni': [nni]}).to_csv(
-        os.path.join(output_dir, f"{folder_name}_particle_results.csv"), index=False)
+        # Save summary CSV only when enabled
+        pd.DataFrame({
+            'avg_particles': [avg_particles],
+            'median_particle_size': [median_area],
+            'spatial_nni': [nni]
+        }).to_csv(os.path.join(output_dir, f"{folder_name}_particle_results.csv"), index=False)
 
-    print(f"[count_particles] Results saved to: {output_dir}")
+        print(f"[count_particles] Results saved to: {output_dir}")
+    else:
+        print("[count_particles] particle_detection disabled — no files or folders created.")
 
-    return pd.DataFrame({'avg_particles': [avg_particles], 'median_particle_size': [median_area], 'spatial_nni': [nni]})
+    # Always return results programmatically
+    return pd.DataFrame({
+        'avg_particles': [avg_particles],
+        'median_particle_size': [median_area],
+        'spatial_nni': [nni]
+    })
