@@ -50,5 +50,5 @@ else:
     print("="*40)
     print("\nParticle Count Results:")
     print(count_df)
-    print("\nMotion Analysis Results:")
+    #print("\nMotion Analysis Results:")
     #print(motion_df)

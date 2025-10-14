@@ -28,8 +28,13 @@ system:
   image_height_px: 4504
   image_width_px: 4504
 wellplate:
-  auto_center_mask: false
-  create_mask: false
+  auto_center_mask: true # Automatically detect center of the well
+  create_mask: true # Mask out areas outside the well
   perfect_circle: true
-  radius_px: 2200
-  type: 6
+  radius_px: 2200 # Expected radius of the well in pixels
+  # Defines the acceptable deviation for the detected well radius from 'radius_px'.
+  # If the detected radius is outside this percentage, the system will fall back
+  # to using the geometric center of the image.
+  radius_tolerance_percent: 10
+  type: 6 # Wellplate type (e.g., 6 for 6-well plate)
+
