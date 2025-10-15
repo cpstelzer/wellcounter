@@ -1,5 +1,5 @@
 motion:
-  analysis_duration: 3
+  analysis_duration: 0.5 # Duration in seconds for motion analysis
   max_search_distance: 20
   min_trajectory_size: 5
   trajectory_random_colors: false
@@ -13,7 +13,7 @@ optimize:
   threshold_to: 24
   training_path: C:/wellcounter/training_data_for_MEE
 outputs:
-  motion: false
+  motion: true
   particle_detection: true
 particle_detection:
   background_is_dark: true

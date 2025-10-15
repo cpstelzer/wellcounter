@@ -29,7 +29,7 @@ import wellcounter_motion_module as wmm
 
 # --- Configuration ---
 # Enter the full path to the folder containing the image sequence
-run_folder_path = "C:/wellcounter/test/20251002_batch1_plate1_well1/"
+run_folder_path = "C:/wellcounter/test/20251007_batch1_plate1_well4/"
 
 
 # --- Analysis ---
@@ -42,7 +42,7 @@ else:
     count_df = wim.count_particles(run_folder_path)
 
     # Perform motion analysis
-    #motion_df = wmm.perform_motion_analysis(run_folder_path)
+    motion_df = wmm.perform_motion_analysis(run_folder_path)
 
     # Print the results
     print("\n" + "="*40)
@@ -50,5 +50,5 @@ else:
     print("="*40)
     print("\nParticle Count Results:")
     print(count_df)
-    #print("\nMotion Analysis Results:")
-    #print(motion_df)
+    print("\nMotion Analysis Results:")
+    print(motion_df)

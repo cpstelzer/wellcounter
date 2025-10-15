@@ -14,7 +14,7 @@ embedded in the filename.
 
 Author: Claus-Peter Stelzer
 Date: 2025-02-07
-Modification Date: 2025-09-22
+Modification Date: 2025-10-15
 """
 
 import cv2
@@ -25,13 +25,11 @@ import random
 import os
 import yaml
 
-config_path = "wellcounter_config.yml"
-with open(config_path, 'r') as file:
-    config = yaml.safe_load(file)
 
 # --- UNCHANGED FUNCTIONS (Included for completeness) ---
 
 def track_particles(particles_by_frame):
+    config = wim.read_config()
     motion_params = config['motion']
     trajectories = {}
     input_data = particles_by_frame.sort_values(by='frame')
@@ -49,7 +47,9 @@ def track_particles(particles_by_frame):
             trajectories[len(trajectories) + 1] = [(frame, x, y, area)]
     return {k: v for k, v in trajectories.items() if len(v) >= motion_params['min_trajectory_size']}
 
+
 def visualize_trajectories(original_image, particle_trajectories):
+    config = wim.read_config()
     motion_params = config['motion']
     image_with_trajectories = cv2.cvtColor(original_image, cv2.COLOR_GRAY2BGR) if len(original_image.shape) == 2 else original_image.copy()
     h, w = original_image.shape[:2]
@@ -62,6 +62,7 @@ def visualize_trajectories(original_image, particle_trajectories):
             cv2.line(image_with_trajectories, p1, p2, color, thickness=2)
             cv2.line(trajectories_only_image, p1, p2, color, thickness=2)
     return image_with_trajectories, trajectories_only_image
+
 
 def extract_movement_variables(trajectories):
     parameters = []
@@ -86,6 +87,7 @@ def extract_movement_variables(trajectories):
     columns = ['obj_id', 'avg_speed', 'max_speed', 'directionality', 'meandering_index', 'displacement', 'trajectory_size']
     return pd.DataFrame(parameters, columns=columns)
 
+
 def summarize_movement_variables(mov_vars_df):
     if mov_vars_df.empty:
         print("Error: No particle trajectories detected!")
@@ -97,20 +99,29 @@ def summarize_movement_variables(mov_vars_df):
             summary[col] = [round(weighted_avg, 3)]
     return pd.DataFrame(summary)
 
+
 # --- MODIFIED HIGH-LEVEL FUNCTIONS ---
 
+
 def record_particle_positions_from_sequence(run_folder_path):
+    config = wim.read_config()
     motion_params = config['motion']
-    image_file_list = wim.get_image_file_list(run_folder_path)
-    fps = wim.get_fps_from_sequence(run_folder_path)
+
+    # --- NEW: account for subdirectory containing images ---
+    image_folder = os.path.join(run_folder_path, "jpg")
+
+    image_file_list = wim.get_image_file_list(image_folder)
+    fps = wim.get_fps_from_sequence(image_folder)
     total_frames = len(image_file_list)
-    
+
     if total_frames == 0:
         return pd.DataFrame(), None
 
     first_frame = wim.get_frame_from_sequence(image_file_list, 0)
-    if first_frame is None: return pd.DataFrame(), None
-        
+
+    if first_frame is None:
+        return pd.DataFrame(), None
+
     height, width = first_frame.shape
     number_of_iterations = min(int(motion_params['analysis_duration'] * fps), total_frames - 1)
     long_exposure_image = np.zeros((height, width), dtype=np.uint8)
@@ -119,42 +130,62 @@ def record_particle_positions_from_sequence(run_folder_path):
 
     for i in range(number_of_iterations):
         print(f"Motion analysis\nProcessing frame no. {i+1} of {number_of_iterations}")
-        frame_a_idx, frame_b_idx = i, i + subtraction_offset
-        if frame_b_idx >= total_frames:
-            print(f"Warning: Subtraction frame out of bounds. Stopping motion analysis early.")
-            break
-            
-        frame_a = wim.get_frame_from_sequence(image_file_list, frame_a_idx)
-        frame_b = wim.get_frame_from_sequence(image_file_list, frame_b_idx)
-        if frame_a is None or frame_b is None: continue
-        
-        subtr_image = cv2.subtract(frame_a, frame_b)
+        frame_a_idx = i
+        frame_b_idx = (i + subtraction_offset) % total_frames  # --- NEW: wrap around if end reached
+
+        # --- NEW: Use imaging module’s standardized subtraction (with masking) ---
+        subtr_image, _ = wim.image_subtraction_from_sequence(image_file_list, frame_a_idx, frame_b_idx)
+        if subtr_image is None:
+            continue
+
+        # --- Detect microorganisms using imaging module’s function ---
         table_of_particles, binary_image = wim.analyze_microorganisms(subtr_image)
         table_of_particles.insert(0, 'frame', i + 1)
-        
+
         result_df = pd.concat([result_df, table_of_particles], ignore_index=True)
         long_exposure_image = cv2.add(long_exposure_image, binary_image)
 
     return result_df, long_exposure_image
 
-def perform_motion_analysis(run_folder_path):
-    output_params = config['outputs']
-    
-    positions_df, long_exposure_image = record_particle_positions_from_sequence(run_folder_path)
-    if long_exposure_image is None: return pd.DataFrame()
 
+def perform_motion_analysis(run_folder_path):
+    """
+    Performs high-level motion analysis on image sequences located in 'run_folder_path/jpg'.
+    Outputs motion analysis results and associated graphical visualizations if enabled in the config file.
+    """
+
+    config = wim.read_config()
+    output_params = config['outputs']
+
+    # --- Image data resides in a 'jpg' subfolder ---
+    image_folder = os.path.join(run_folder_path, "jpg")
+
+    # --- Record particle positions from sequence ---
+    positions_df, long_exposure_image = record_particle_positions_from_sequence(run_folder_path)
+    if long_exposure_image is None or positions_df.empty:
+        print("[perform_motion_analysis] No valid frames or particles detected.")
+        return pd.DataFrame()
+
+    # --- Track particles and extract motion parameters ---
     trajectories = track_particles(positions_df)
     movement_variables = extract_movement_variables(trajectories)
     summary_df = summarize_movement_variables(movement_variables)
-  
-    if output_params['motion']:
-        filename = os.path.basename(run_folder_path)
-        output_path = os.path.join(os.path.dirname(run_folder_path), f'{filename}_motion_analysis')
+
+    # --- Output control ---
+    if output_params.get('motion', False):
+        filename = os.path.basename(run_folder_path.rstrip("/\\"))
+        output_path = os.path.join(os.path.dirname(run_folder_path.rstrip("/\\")), f"{filename}_motion_analysis")
         os.makedirs(output_path, exist_ok=True)
-        
-        first_frame = wim.get_frame_from_sequence(wim.get_image_file_list(run_folder_path), 0)
+
+        # --- Retrieve first frame from jpg subfolder ---
+        first_frame = wim.get_frame_from_sequence(wim.get_image_file_list(image_folder), 0)
+        if first_frame is None:
+            print("[perform_motion_analysis] Warning: could not read first frame for visualization.")
+
+        # --- Visualize trajectories ---
         image_with_tracks, tracks_only = visualize_trajectories(long_exposure_image, trajectories)
-        
+
+        # --- Save results ---
         positions_df.to_csv(os.path.join(output_path, 'particle_positions.csv'), index=False)
         cv2.imwrite(os.path.join(output_path, 'long_exposure_image.jpg'), long_exposure_image)
         if first_frame is not None:
@@ -163,5 +194,10 @@ def perform_motion_analysis(run_folder_path):
         cv2.imwrite(os.path.join(output_path, 'tracks.jpg'), tracks_only)
         movement_variables.to_csv(os.path.join(output_path, 'movement_by_trajectory.csv'), index=False)
         summary_df.to_csv(os.path.join(output_path, 'summary_motion_analysis.csv'), index=False)
-  
+
+        print(f"[perform_motion_analysis] Motion analysis outputs saved to: {output_path}")
+    else:
+        print("[perform_motion_analysis] Motion outputs disabled in configuration.")
+
     return summary_df
+
