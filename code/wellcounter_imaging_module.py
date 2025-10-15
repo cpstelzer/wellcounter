@@ -105,7 +105,12 @@ def calculate_measurements(contour):
             'aspect_ratio': aspect_ratio, 'solidity': solidity, 'eccentricity': eccentricity, 
             'feret_diameter': feret_diameter, 'bounding_x': x, 'bounding_y': y, 'bounding_w': w, 'bounding_h': h}
 
-def mask_well_area(image):
+# --- MODIFIED FUNCTION: mask_well_area (added caching support) ---
+def mask_well_area(image, cached_center=None, cached_mask=None):
+    """
+    Mask the well area of an image.
+    If cached_center or cached_mask is provided, reuse them to skip recomputation.
+    """
     config = read_config()
     wellplate_params = config['wellplate']
     system_params = config['system']
@@ -113,44 +118,45 @@ def mask_well_area(image):
     if len(image.shape) == 3:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    center = None
+    # --- Reuse cached mask if provided ---
+    if cached_mask is not None:
+        print("[mask_well_area] Reusing cached well mask", flush=True)
+        result_image = cv2.bitwise_and(image, image, mask=cached_mask)
+        return result_image, cached_mask
+
+    print("[mask_well_area] Determining new well mask ...", flush=True)
+
+    center = cached_center
     threshold = None
+    
     try:
-        if wellplate_params['auto_center_mask']:
-            #_, threshold = cv2.threshold(image, 5, 255, cv2.THRESH_BINARY) # fixed threshold
-            _, threshold = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU) # adaptive threshold
+        if center is None and wellplate_params['auto_center_mask']:
+            _, threshold = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             contours, _ = cv2.findContours(threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if len(contours) == 0:
                 print("[mask_well_area] No contours found!", flush=True)
-                center = (int(system_params['image_width_px']/2),
-                          int(system_params['image_height_px']/2))
+                center = (int(system_params['image_width_px'] / 2),
+                          int(system_params['image_height_px'] / 2))
             else:
                 largest_contour = max(contours, key=cv2.contourArea)
                 (cx, cy), _ = cv2.minEnclosingCircle(largest_contour)
-                center = (int(cx), int(cy))
-
-                # sanity check (if it fails, use image center)
                 if not (0 <= cx <= system_params['image_width_px'] and 0 <= cy <= system_params['image_height_px']):
                     print(f"[mask_well_area] Invalid center: ({cx:.1f},{cy:.1f}) – using image center", flush=True)
-                    cx, cy = system_params['image_width_px']/2, system_params['image_height_px']/2
+                    cx, cy = system_params['image_width_px'] / 2, system_params['image_height_px'] / 2
                 center = (int(cx), int(cy))
-                
-        else:
-            center = (int(system_params['image_width_px']/2),
-                      int(system_params['image_height_px']/2))
+        elif center is None:
+            center = (int(system_params['image_width_px'] / 2),
+                      int(system_params['image_height_px'] / 2))
     except Exception as e:
         print(f"[mask_well_area] ERROR during contour detection: {e}", flush=True)
-        center = (int(system_params['image_width_px']/2),
-                  int(system_params['image_height_px']/2))
+        center = (int(system_params['image_width_px'] / 2),
+                  int(system_params['image_height_px'] / 2))
 
     radius = int(wellplate_params['radius_px'] * 0.9)
     mask = np.zeros_like(image)
     cv2.circle(mask, center, radius, 255, thickness=-1)
     result_image = cv2.bitwise_and(image, image, mask=mask)
-
-    # Always print something to stdout
-    print(f"[mask_well_area] Center: {center}, radius: {radius}", flush=True)
-
+    print(f"[mask_well_area] Well mask determined: center = {center}, radius = {radius}", flush=True)
     return result_image, mask
 
 
@@ -383,12 +389,14 @@ def spatial_analysis(table_of_particles):
 
 # HIGH-LEVEL FUNCTIONS (frame-index based; pairwise comparisons) 
 
-def image_subtraction_from_sequence(image_file_list, frame_idx1, frame_idx2):
+def image_subtraction_from_sequence(image_file_list, frame_idx1, frame_idx2, cached_mask=None):
     """
     Subtract two frames given by frame indices (frame_idx1 - frame_idx2).
     Returns:
       - result_image: subtracted + masked (or raw subtracted if mask disabled)
       - masked_image: masked version of image_a (used for saving masked well)
+
+    Reuses a cached mask if provided.
     """
     config = read_config()
     wellplate_params = config['wellplate']
@@ -398,13 +406,13 @@ def image_subtraction_from_sequence(image_file_list, frame_idx1, frame_idx2):
         return None, None
     subtr_image = np.clip(cv2.subtract(image_a, image_b), 0, 255).astype(np.uint8)
     if wellplate_params['create_mask']:
-        masked_image, mask = mask_well_area(image_a)
+        masked_image, mask = mask_well_area(image_a, cached_mask=cached_mask)
         result_image = cv2.bitwise_and(subtr_image, subtr_image, mask=mask)
     else:
         result_image, masked_image = subtr_image, image_a
     return result_image, masked_image
 
-def image_analysis_of_sample(run_folder_path, image_file_list, frame_idx1, frame_idx2):
+def image_analysis_of_sample(run_folder_path, image_file_list, ref_idx, sub_idx, cached_mask=None):
     """
     Analyze a single pair of frames: subtract frame_idx2 from frame_idx1,
     detect particles on the subtraction and also provide the binary image and
@@ -414,7 +422,7 @@ def image_analysis_of_sample(run_folder_path, image_file_list, frame_idx1, frame
     (no file saving is done here to avoid per-call CSV/image duplication;
      final saving occurs in count_particles() to match original output layout).
     """
-    subtr_image, masked_image = image_subtraction_from_sequence(image_file_list, frame_idx1, frame_idx2)
+    subtr_image, masked_image = image_subtraction_from_sequence(image_file_list, ref_idx, sub_idx, cached_mask=cached_mask)
     if subtr_image is None:
         return pd.DataFrame(), None, None
     table_of_particles, binary_image = analyze_microorganisms(subtr_image)
@@ -438,7 +446,11 @@ def count_particles(run_folder_path):
     if total_frames < 3:
         print(f"Warning: Not enough frames in {run_folder_path} for full analysis.")
         return pd.DataFrame({'avg_particles': [0], 'median_particle_size': [np.nan], 'spatial_nni': [np.nan]})
-
+    
+     # --- NEW: determine the well mask once for the sequence ---
+    first_frame = get_frame_from_sequence(image_file_list, 0)
+    _, global_mask = mask_well_area(first_frame)
+    
     # Frame selection logic
     if total_frames <= 5:
         dataset_type = "sampled"
@@ -490,8 +502,8 @@ def count_particles(run_folder_path):
         merges the results, and validates against the unsubtracted frame.
         """
         # Perform the two subtractions from the reference frame
-        df_sub1, bin1, masked_ref = image_analysis_of_sample(run_folder_path, image_file_list, ref_idx, sub1_idx)
-        df_sub2, bin2, _ = image_analysis_of_sample(run_folder_path, image_file_list, ref_idx, sub2_idx)
+        df_sub1, bin1, masked_ref = image_analysis_of_sample(run_folder_path, image_file_list, ref_idx, sub1_idx, cached_mask=global_mask)
+        df_sub2, bin2, _ = image_analysis_of_sample(run_folder_path, image_file_list, ref_idx, sub2_idx, cached_mask=global_mask)
 
         # Merge the two subtraction results
         merged_subs = compare_detected_particles(df_sub1, df_sub2)
@@ -504,7 +516,7 @@ def count_particles(run_folder_path):
         ref_frame = get_frame_from_sequence(image_file_list, ref_idx)
         final_table = merged_subs  # Default if frame is unreadable
         if ref_frame is not None:
-            masked_fframe, _ = mask_well_area(ref_frame)
+            masked_fframe, _ = mask_well_area(ref_frame, cached_mask=global_mask)
             df_unsub, binary_unsub = analyze_unsubtracted(masked_fframe)
 
             # For debugging only: save intermediate images

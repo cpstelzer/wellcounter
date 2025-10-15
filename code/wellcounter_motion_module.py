@@ -118,6 +118,7 @@ def record_particle_positions_from_sequence(run_folder_path):
         return pd.DataFrame(), None
 
     first_frame = wim.get_frame_from_sequence(image_file_list, 0)
+    _, global_mask = wim.mask_well_area(first_frame)
 
     if first_frame is None:
         return pd.DataFrame(), None
@@ -134,7 +135,7 @@ def record_particle_positions_from_sequence(run_folder_path):
         frame_b_idx = (i + subtraction_offset) % total_frames  # --- NEW: wrap around if end reached
 
         # --- NEW: Use imaging module’s standardized subtraction (with masking) ---
-        subtr_image, _ = wim.image_subtraction_from_sequence(image_file_list, frame_a_idx, frame_b_idx)
+        subtr_image, _ = wim.image_subtraction_from_sequence(image_file_list, frame_a_idx, frame_b_idx, cached_mask=global_mask)
         if subtr_image is None:
             continue
 
