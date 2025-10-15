@@ -149,8 +149,7 @@ def mask_well_area(image):
     result_image = cv2.bitwise_and(image, image, mask=mask)
 
     # Always print something to stdout
-    print(f"[mask_well_area] Center: {center}, radius: {radius}, "
-          f"threshold_saved: {threshold is not None}", flush=True)
+    print(f"[mask_well_area] Center: {center}, radius: {radius}", flush=True)
 
     return result_image, mask
 
@@ -165,9 +164,7 @@ def analyze_microorganisms(image):
     binary_image = np.zeros(image.shape[:2], dtype=np.uint8)
     cv2.drawContours(binary_image, valid_contours, -1, 255, thickness=cv2.FILLED)
     df = pd.DataFrame([m for cnt in valid_contours if (m := calculate_measurements(cnt)) is not None])
-    if not df.empty and params['filter_by_shape']:
-        df = df[(df['solidity'] >= 0.655) & (df['solidity'] <= 0.987) & (df['eccentricity'] >= 0.309) & (df['eccentricity'] <= 0.948) & (df['aspect_ratio'] >= 0.44) & (df['aspect_ratio'] <= 2.19)]
-    return df.sort_values(by=['Y', 'X']) if not df.empty else df, binary_image
+    return df, binary_image
 
 def analyze_unsubtracted(image):
     config = read_config()
@@ -192,21 +189,121 @@ def label_particles(image, table_of_particles):
             cv2.circle(image, (x, y), search_radius, (0, 252, 124), thickness=3)
     return image
 
+def visualize_shape_filtering(image, df_before, df_after, output_path=None):
+    """
+    Visualize which particles were excluded by the shape filter.
 
-def compare_detected_particles(df_ref, df_query):
+    Parameters
+    ----------
+    image : np.ndarray
+        Grayscale or color image.
+    df_before : pandas.DataFrame
+        Particle table before filtering.
+    df_after : pandas.DataFrame
+        Particle table after filtering.
+    output_path : str, optional
+        If given, saves the resulting image to this path.
+
+    Returns
+    -------
+    np.ndarray
+        Image with kept (green) and excluded (red) particles drawn.
+    """
+    if df_before is None or df_before.empty:
+        print("[visualize_shape_filtering] No particles to visualize.")
+        return image
+    if len(image.shape) == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+    # Prepare coordinate sets
+    kept_coords = set(zip(df_after['X'], df_after['Y']))
+    all_coords = set(zip(df_before['X'], df_before['Y']))
+    excluded_coords = all_coords - kept_coords
+
+    # Determine radius from config
+    config = read_config()
+    params = config['particle_detection']
+    radius = round(params['search_radius_factor'] *
+                   np.sqrt(params['default_particle_area'] / np.pi))
+
+    # Draw green for kept particles
+    for (x, y) in kept_coords:
+        cv2.circle(image, (int(x), int(y)), radius, (0, 255, 0), 2)
+
+    # Draw red for excluded particles
+    for (x, y) in excluded_coords:
+        cv2.circle(image, (int(x), int(y)), radius, (0, 0, 255), 2)
+
+    print(f"[visualize_shape_filtering] Kept {len(kept_coords)}, excluded {len(excluded_coords)} particles.")
+
+    if output_path:
+        cv2.imwrite(output_path, image)
+    return image
+
+
+def filter_particles_by_shape(df):
+    """
+    Apply post-detection shape filtering to particle tables.
+    Removes particles that are too large (area > 3000) OR too irregular (solidity < 0.2).
+    """
+    if df is None or df.empty:
+        return df
+    mask = (df['area'] <= 3000) & (df['solidity'] >= 0.2)
+    filtered = df[mask].copy().reset_index(drop=True)
+    removed = len(df) - len(filtered)
+    if removed > 0:
+        print(f"[filter_particles_by_shape] Removed {removed} particles (area>3000 or solidity<0.2)")
+    return filtered
+
+
+def compare_detected_particles(df_ref, df_query, measurement_cols=None):
+    """
+    Compare detected particles in two data frames (reference and query)
+    based on spatial proximity in X, Y coordinates. Returns a merged data frame
+    containing matched and unmatched particles, with origin flags.
+
+    Parameters
+    ----------
+    df_ref : pandas.DataFrame or None
+        Reference particle data. Must contain 'X' and 'Y' columns.
+    df_query : pandas.DataFrame or None
+        Query particle data. Must contain 'X' and 'Y' columns.
+    measurement_cols : list of str, optional
+        List of measurement columns (e.g., ['area', 'perimeter', ...])
+        that should be carried over into the merged result.
+        If None, the function will automatically infer all non-essential
+        columns shared by df_ref and df_query (excluding in_ref/in_query).
+
+    Returns
+    -------
+    pandas.DataFrame
+        Combined table with columns:
+        [X, Y, <measurement_cols>, in_ref, in_query]
+    """
+    
     config = read_config()
     params = config['particle_detection']
 
-    expected_cols = [
-        'X', 'Y', 'area', 'perimeter', 'orientation',
-        'aspect_ratio', 'solidity', 'eccentricity', 'feret_diameter',
-        'bounding_x', 'bounding_y', 'bounding_w', 'bounding_h',
-        'in_ref', 'in_query'
-    ]
+    # --- define essential columns
+    essential_cols = ['X', 'Y', 'in_ref', 'in_query']
 
+    # --- determine which measurement columns to include
+    if measurement_cols is None:
+        # all columns except essentials found in either df
+        cols_ref = set(df_ref.columns if df_ref is not None else [])
+        cols_query = set(df_query.columns if df_query is not None else [])
+        measurement_cols = sorted(list((cols_ref | cols_query) - set(essential_cols)))
+    else:
+        # make sure it's a clean list of strings
+        measurement_cols = [str(c) for c in measurement_cols]
+
+    expected_cols = essential_cols[:2] + measurement_cols + essential_cols[2:]
+
+    # --- helper to create empty output
     def empty_df():
         return pd.DataFrame(columns=expected_cols)
 
+    # --- handle None inputs
     if df_ref is None and df_query is None:
         return empty_df()
     if df_ref is None:
@@ -214,12 +311,14 @@ def compare_detected_particles(df_ref, df_query):
     if df_query is None:
         df_query = pd.DataFrame()
 
+    # --- ensure all required columns exist
     for col in expected_cols:
         if col not in df_ref.columns:
             df_ref[col] = np.nan
         if col not in df_query.columns:
             df_query[col] = np.nan
 
+    # --- handle empty inputs
     if df_ref.empty and df_query.empty:
         return empty_df()
     if df_ref.empty:
@@ -231,35 +330,42 @@ def compare_detected_particles(df_ref, df_query):
         df_ref['in_ref'], df_ref['in_query'] = 1, 0
         return df_ref[expected_cols]
 
+    # --- require coordinate columns
     if 'X' not in df_ref.columns or 'Y' not in df_ref.columns or \
        'X' not in df_query.columns or 'Y' not in df_query.columns:
         return empty_df()
 
+    # --- perform nearest-neighbor matching
     search_radius = params['search_radius_factor'] * np.sqrt(params['default_particle_area'] / np.pi)
     tree_query = BallTree(df_query[['X', 'Y']].values)
     distances, indices = tree_query.query(df_ref[['X', 'Y']].values, k=1)
     matched_query_indices, matches = set(), []
 
     for i, (idx, dist) in enumerate(zip(indices.flatten(), distances.flatten())):
-        row_dict = df_ref.iloc[i].to_dict()
+        row_dict = df_ref.iloc[i].to_dict() # start with reference row
         if dist <= search_radius and idx not in matched_query_indices:
             matched_query_indices.add(idx)
-            row_dict.update(df_query.iloc[idx].to_dict())
+            row_dict.update(df_query.iloc[idx].to_dict()) # overwrite with query values
+            # For matched particles, all measurement columns (X, Y, area, perimeter, etc.) come from df_query
             row_dict.update({'in_ref': 1, 'in_query': 1})
         else:
             row_dict.update({'in_ref': 1, 'in_query': 0})
+            # For unmatched reference particles, measurement columns remain from df_ref
         matches.append(row_dict)
 
+    # After processing all reference rows, the unmatched ones from the query are appended
     unmatched_query = df_query.drop(index=list(matched_query_indices)).copy()
     unmatched_query['in_ref'], unmatched_query['in_query'] = 0, 1
 
     merged = pd.concat([pd.DataFrame(matches), unmatched_query], ignore_index=True)
 
+    # --- ensure expected columns exist and correct order
     for col in expected_cols:
         if col not in merged.columns:
             merged[col] = np.nan
 
     return merged[expected_cols]
+
 
 
 def spatial_analysis(table_of_particles):
@@ -401,28 +507,53 @@ def count_particles(run_folder_path):
             masked_fframe, _ = mask_well_area(ref_frame)
             df_unsub, binary_unsub = analyze_unsubtracted(masked_fframe)
 
-            # Only save debug images if flag is True
-            if save_outputs:
-                os.makedirs(output_dir, exist_ok=True)
-
-                if binary_unsub is not None:
-                    cv2.imwrite(os.path.join(output_dir, f'debug_ref{ref_idx}_unsubtracted_binary.png'), binary_unsub)
-                if masked_fframe is not None:
-                    cv2.imwrite(os.path.join(output_dir, f'debug_ref{ref_idx}_masked.png'), masked_fframe)
-                if ref_frame is not None:
-                    cv2.imwrite(os.path.join(output_dir, f'debug_ref{ref_idx}_raw.png'), ref_frame)
+            # For debugging only: save intermediate images
+            #if save_outputs:
+            #    os.makedirs(output_dir, exist_ok=True)
+            
+            #    if binary_unsub is not None:
+            #        cv2.imwrite(os.path.join(output_dir, f'debug_ref{ref_idx}_unsubtracted_binary.png'), binary_unsub)
+            #    if masked_fframe is not None:
+            #        cv2.imwrite(os.path.join(output_dir, f'debug_ref{ref_idx}_masked.png'), masked_fframe)
+            #    if ref_frame is not None:
+            #        cv2.imwrite(os.path.join(output_dir, f'debug_ref{ref_idx}_raw.png'), ref_frame)
 
             merged_with_unsub = compare_detected_particles(merged_subs, df_unsub)
+            # Keep only particles detected in the reference frame (i.e., moving particles)
             final_table = merged_with_unsub[merged_with_unsub['in_ref'] != 0].copy().reset_index(drop=True)
 
-        print(f"[run_single_analysis] RefFrame {ref_idx}: Found {len(df_sub1)} (vs {sub1_idx}) and {len(df_sub2)} (vs {sub2_idx}) particles. Final count: {len(final_table)}")
-        return final_table, bin1, bin2, masked_ref
+        #print(f"[run_single_analysis] RefFrame {ref_idx}: Found {len(df_sub1)} (vs {sub1_idx}) and {len(df_sub2)} (vs {sub2_idx}) particles. Final count: {len(final_table)}")
+        return final_table, bin1, bin2, masked_ref, binary_unsub if 'binary_unsub' in locals() else None
+        
 
 
     # Perform three INDEPENDENT analyses
-    final_table1, binary1, binary2, masked1 = run_single_analysis(frame1_idx, frame2_idx, frame3_idx, output_dir)
-    final_table2, _, _, _ = run_single_analysis(frame2_idx, frame1_idx, frame3_idx, output_dir)
-    final_table3, _, _, _ = run_single_analysis(frame3_idx, frame1_idx, frame2_idx, output_dir)
+    final_table1, binary1, binary2, masked1, binary_unsub1 = run_single_analysis(frame1_idx, frame2_idx, frame3_idx, output_dir)
+    final_table2, _, _, _, _ = run_single_analysis(frame2_idx, frame1_idx, frame3_idx, output_dir)
+    final_table3, _, _, _, _ = run_single_analysis(frame3_idx, frame1_idx, frame2_idx, output_dir)
+
+    # Optional post-detection shape filtering
+    config = read_config()
+    if config['particle_detection'].get('filter_by_shape', False):
+        # Keep copies before filtering (for visualization)
+        unfiltered1 = final_table1.copy()
+        unfiltered2 = final_table2.copy()
+        unfiltered3 = final_table3.copy()
+
+        # Apply filtering
+        final_table1 = filter_particles_by_shape(final_table1)
+        final_table2 = filter_particles_by_shape(final_table2)
+        final_table3 = filter_particles_by_shape(final_table3)
+
+        # If saving outputs, create filtered visualization for the first frame
+        if save_outputs:
+            first_frame = get_frame_from_sequence(image_file_list, frame1_idx)
+            if first_frame is not None and not unfiltered1.empty:
+                output_path = os.path.join(output_dir, 'frame1_particles_filtered.jpg')
+                visualize_shape_filtering(first_frame.copy(),
+                                        df_before=unfiltered1,
+                                        df_after=final_table1,
+                                        output_path=output_path)
 
     # Calculate metrics by averaging the independent results
     p1 = len(final_table1)
@@ -463,6 +594,22 @@ def count_particles(run_folder_path):
         if binary2 is not None:
             cv2.imwrite(os.path.join(output_dir, 'image_subtraction2.jpg'),
                         label_particles(binary2, final_table1))
+            
+        # --- Save unsubtracted binary image of first frame (with filtered particles) ---
+        if save_outputs and binary_unsub1 is not None:
+            unsub_path = os.path.join(output_dir, 'frame1_binary_unsub.jpg')
+
+            # Overlay final (filtered) particle positions on the binary image
+            if final_table1 is not None and not final_table1.empty:
+                labeled_unsub = label_particles(binary_unsub1.copy(), final_table1)
+                cv2.imwrite(unsub_path, labeled_unsub)
+                print(f"[count_particles] Saved unsubtracted binary image with {len(final_table1)} filtered particles: {unsub_path}")
+            else:
+                cv2.imwrite(unsub_path, binary_unsub1)
+                print(f"[count_particles] Saved unsubtracted binary image (no particles detected): {unsub_path}")
+
+
+
         final_table1.to_csv(os.path.join(output_dir, 'table_of_particles.csv'), index=False)
 
         # Save summary CSV only when enabled
