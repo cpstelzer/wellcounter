@@ -102,7 +102,6 @@ def summarize_movement_variables(mov_vars_df):
 
 # --- MODIFIED HIGH-LEVEL FUNCTIONS ---
 
-
 def record_particle_positions_from_sequence(run_folder_path):
     config = wim.read_config()
     motion_params = config['motion']
@@ -147,6 +146,107 @@ def record_particle_positions_from_sequence(run_folder_path):
         long_exposure_image = cv2.add(long_exposure_image, binary_image)
 
     return result_df, long_exposure_image
+
+def generate_long_exposure_image_custom(
+    run_folder_path,
+    analysis_duration: float = 0.5,
+    microorganism_threshold: int = 12,
+    min_microorganism_area: int = 105
+):
+    """
+    Generate a Long Exposure Image (LEI) using configurable parameters.
+
+    This function temporarily modifies the configuration file on disk
+    to use the specified analysis_duration (in seconds) and microorganism
+    detection parameters, runs the standard
+    `record_particle_positions_from_sequence()`, and restores the original
+    configuration afterward.
+
+    Parameters
+    ----------
+    run_folder_path : str
+        Path to the run folder containing the image sequence (expects subfolder 'jpg').
+    analysis_duration : float, optional
+        Duration of frame accumulation in seconds. Default is 0.5 s.
+    microorganism_threshold : int, optional
+        Binary threshold for detecting particles. Default is 12.
+    min_microorganism_area : int, optional
+        Minimum area (in px²) for detected particles. Default is 105.
+
+    Returns
+    -------
+    result_df : pandas.DataFrame
+        DataFrame containing particle positions from the analyzed frames.
+    long_exposure_image : numpy.ndarray
+        The generated long-exposure image.
+    """
+
+    import os
+    import cv2
+    import yaml
+    import wellcounter_imaging_module as wim
+
+    # --- Locate and read config file ---
+    config_path = "wellcounter_config.yml"
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+    with open(config_path, "r") as f:
+        original_config = yaml.safe_load(f)
+
+    # --- Apply temporary parameters ---
+    config['motion']['analysis_duration'] = float(analysis_duration)
+    config['particle_detection']['microorganism_threshold'] = int(microorganism_threshold)
+    config['particle_detection']['min_microorganism_area'] = int(min_microorganism_area)
+
+    # --- Write modified config to disk ---
+    with open(config_path, "w") as f:
+        yaml.safe_dump(config, f)
+    print("[generate_long_exposure_image_custom] Temporary config written to disk:")
+    print(f"  motion.analysis_duration = {config['motion']['analysis_duration']}")
+    print(f"  particle_detection.microorganism_threshold = {config['particle_detection']['microorganism_threshold']}")
+    print(f"  particle_detection.min_microorganism_area = {config['particle_detection']['min_microorganism_area']}")
+
+    # --- Run the standard particle recording function ---
+    try:
+        result_df, long_exposure_image = record_particle_positions_from_sequence(run_folder_path)
+    finally:
+        # --- Always restore the original config ---
+        with open(config_path, "w") as f:
+            yaml.safe_dump(original_config, f)
+        print("[generate_long_exposure_image_custom] Original config restored.")
+
+    # --- Save the long-exposure image if output enabled ---
+    output_params = original_config.get('outputs', {})
+    if long_exposure_image is None:
+        print("[generate_long_exposure_image_custom] Failed to generate LEI.")
+        return result_df, None
+
+    if output_params.get('particle_detection', False):
+        parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
+        folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
+        output_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
+        os.makedirs(output_dir, exist_ok=True)
+
+        lei_path = os.path.join(output_dir, "LEI_males.jpg")
+        cv2.imwrite(lei_path, long_exposure_image)
+
+        # --- Log parameter values for reproducibility ---
+        log_path = os.path.join(output_dir, "LEI_males_log.txt")
+        with open(log_path, "w") as log_file:
+            log_file.write("LEI generation parameters:\n")
+            log_file.write(f"analysis_duration: {analysis_duration}\n")
+            log_file.write(f"microorganism_threshold: {microorganism_threshold}\n")
+            log_file.write(f"min_microorganism_area: {min_microorganism_area}\n")
+            log_file.write(f"output_path: {lei_path}\n")
+        print(f"[generate_long_exposure_image_custom] LEI saved: {lei_path}")
+        print(f"[generate_long_exposure_image_custom] Parameters logged to: {log_path}")
+    else:
+        print("[generate_long_exposure_image_custom] particle_detection output disabled — LEI not saved.")
+
+    return result_df, long_exposure_image
+
+
+
 
 
 def perform_motion_analysis(run_folder_path):

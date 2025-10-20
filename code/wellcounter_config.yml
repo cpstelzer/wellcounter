@@ -1,5 +1,5 @@
 motion:
-  analysis_duration: 0.5 # Duration in seconds for motion analysis
+  analysis_duration: 3
   max_search_distance: 20
   min_trajectory_size: 5
   trajectory_random_colors: false
@@ -28,13 +28,9 @@ system:
   image_height_px: 4504
   image_width_px: 4504
 wellplate:
-  auto_center_mask: true # Automatically detect center of the well
-  create_mask: true # Mask out areas outside the well
+  auto_center_mask: true
+  create_mask: true
   perfect_circle: true
-  radius_px: 2200 # Expected radius of the well in pixels
-  # Defines the acceptable deviation for the detected well radius from 'radius_px'.
-  # If the detected radius is outside this percentage, the system will fall back
-  # to using the geometric center of the image.
+  radius_px: 2200
   radius_tolerance_percent: 10
-  type: 6 # Wellplate type (e.g., 6 for 6-well plate)
-
+  type: 6
