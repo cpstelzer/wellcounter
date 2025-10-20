@@ -390,6 +390,68 @@ def spatial_analysis(table_of_particles):
     r_e = 0.5 / np.sqrt(n / A) if n > 0 else 0
     return r_min / r_e if r_e > 0 else np.nan
 
+
+import numpy as np
+import cv2
+import networkx as nx
+from skimage.morphology import thin
+
+def extract_major_ridge(mask):
+    """
+    Extract a single, smooth centerline near the geometric middle of an irregular particle.
+    Prefers high-distance (central) pixels instead of purely longest endpoints.
+    Returns a boolean array of the same shape.
+    """
+    mask = mask.astype(np.uint8)
+    if mask.sum() == 0:
+        return np.zeros_like(mask, bool)
+
+    # Distance transform (L2)
+    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+
+    # Initial ridge region: high-distance zone, thinned
+    ridge = dist > 0.5 * dist[mask > 0].max()
+    ridge = thin(ridge)
+
+    # Build weighted graph where edges in thick areas are cheaper
+    ys, xs = np.nonzero(ridge)
+    if len(ys) < 2:
+        return ridge
+
+    G = nx.Graph()
+    for y, x in zip(ys, xs):
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0:
+                    continue
+                yy, xx = y + dy, x + dx
+                if 0 <= yy < ridge.shape[0] and 0 <= xx < ridge.shape[1] and ridge[yy, xx]:
+                    # Edge cost inversely proportional to centrality (distance value)
+                    w = 1.0 / (1e-3 + 0.5 * (dist[y, x] + dist[yy, xx]))
+                    G.add_edge((y, x), (yy, xx), weight=w)
+
+    # Find two endpoints that maximize weighted path length
+    lengths = dict(nx.all_pairs_dijkstra_path_length(G, weight='weight'))
+    max_d, start, end = 0, None, None
+    for u, dists in lengths.items():
+        for v, d in dists.items():
+            if d > max_d:
+                max_d, start, end = d, u, v
+    if start is None or end is None:
+        return ridge
+
+    path = nx.shortest_path(G, start, end, weight='weight')
+
+    # Create final mask
+    clean = np.zeros_like(ridge, bool)
+    for (y, x) in path:
+        clean[y, x] = True
+
+    return clean
+
+
+
+
 def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_path,
                                              collage_metric="mean_width"):
     """
@@ -459,6 +521,15 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
         n_pixels = len(skel_coords)
         if n_pixels < 2:
             continue
+        
+        # --- Geodesic centerline extraction ---
+        ridge = extract_major_ridge(mask)
+        region_ridge_pixels = np.argwhere(ridge)
+        if region_ridge_pixels.size > 0:
+            ridge_length = len(region_ridge_pixels)
+        else:
+            ridge_length = 0
+
 
         # Skeleton metrics
         diffs = np.diff(skel_coords, axis=0)
@@ -509,7 +580,8 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
             "mean_width": mean_width,
             "width_std": width_std,
             "solidity": solidity,
-            "circularity": circularity
+            "circularity": circularity,
+            "ridge_length": ridge_length
         })
 
         # Visualization overlay
@@ -539,7 +611,26 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
         print(f"[analyze_long_exposure_particles_advanced] Saved: {analyzed_path}")
         print(f"[analyze_long_exposure_particles_advanced] Saved: {df_path}")
 
-        # ----------------------------------------------------------------------
+
+        # --- Diagnostic visualization: Geodesic centerline overlay ---
+    if save_outputs:
+        lei_centerline_overlay = cv2.cvtColor(gray.copy(), cv2.COLOR_GRAY2BGR)
+
+        for region in props:
+            mask = (labeled == region.label).astype(np.uint8)
+            ridge = extract_major_ridge(mask)
+            ys, xs = np.nonzero(ridge)
+            for y, x in zip(ys, xs):
+                if 0 <= y < lei_centerline_overlay.shape[0] and 0 <= x < lei_centerline_overlay.shape[1]:
+                    lei_centerline_overlay[y, x] = (0, 0, 255)  # red ridge pixels
+
+        out_path_centerline = os.path.join(output_dir, "LEI_males_centerline.jpg")
+        cv2.imwrite(out_path_centerline, lei_centerline_overlay)
+        print(f"[analyze_long_exposure_particles_advanced] Geodesic centerline overlay saved: {out_path_centerline}")
+
+
+
+    # ----------------------------------------------------------------------
     # --- Subfunction: Diagnostic Collage ---------------------------------
     # ----------------------------------------------------------------------
     def create_diagnostic_collage_fixed(df, skeletons, metric="mean_width",
