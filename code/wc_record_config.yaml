@@ -3,7 +3,7 @@
 # --- File Paths ---
 paths:
   # Base directory where all the well-specific folders will be created.
-  output_folder_base: "C:/wellcounter/popgrowth_20251001/"
+  output_folder_base: "C:/wellcounter/popgrowth_20251022/"
   
   # Name of the detailed metadata log file created inside each well's folder.
   log_filename: "metadata_log.csv"

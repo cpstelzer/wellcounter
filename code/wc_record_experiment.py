@@ -304,7 +304,7 @@ def main(csv_file, batch, config):
 if __name__ == "__main__":
     try:
         config = load_config()
-        csv_file = "C:/CodeLab/wellcounter/code/wellpositions_all_driftcompensated.csv"
+        csv_file = "C:/CodeLab/wellcounter/code/wellpositions_all_driftcompensated_t41.csv"
         batch = int(input("Enter the batch number: "))
         user_input = input("Please ensure that:\n"
                       "1) Plates are in their correct positions, and lids have been removed\n"
