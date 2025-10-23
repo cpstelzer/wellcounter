@@ -125,15 +125,28 @@ def generate_long_exposure_image_custom(
 
     return result_df, long_exposure_image
 
-def extract_major_ridge(mask):
+def extract_major_ridge(mask, return_path: bool = False):
     """
     Extract a single, smooth centerline near the geometric middle of an irregular particle.
     Prefers high-distance (central) pixels instead of purely longest endpoints.
-    Returns a boolean array of the same shape.
+
+    Parameters
+    ----------
+    mask : np.ndarray of dtype uint8 or bool
+        Binary particle mask (nonzero = foreground).
+    return_path : bool, optional
+        If True, also return the ordered list of (y, x) pixels along the geodesic centerline.
+
+    Returns
+    -------
+    ridge_mask : np.ndarray (bool)
+        Boolean array with True on centerline pixels.
+    path_coords : list[tuple[int,int]]  (only if return_path=True)
+        Ordered list of (y, x) coordinates from one endpoint to the other.
     """
     mask = mask.astype(np.uint8)
     if mask.sum() == 0:
-        return np.zeros_like(mask, bool)
+        return (np.zeros_like(mask, bool), []) if return_path else np.zeros_like(mask, bool)
 
     # Distance transform (L2)
     dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
@@ -142,11 +155,11 @@ def extract_major_ridge(mask):
     ridge = dist > 0.5 * dist[mask > 0].max()
     ridge = thin(ridge)
 
-    # Build weighted graph where edges in thick areas are cheaper
     ys, xs = np.nonzero(ridge)
     if len(ys) < 2:
-        return ridge
+        return (ridge, [(int(ys[0]), int(xs[0]))] if len(ys) == 1 else []) if return_path else ridge
 
+    # Weighted graph: cheaper in central (high-distance) areas
     G = nx.Graph()
     for y, x in zip(ys, xs):
         for dy in (-1, 0, 1):
@@ -155,11 +168,10 @@ def extract_major_ridge(mask):
                     continue
                 yy, xx = y + dy, x + dx
                 if 0 <= yy < ridge.shape[0] and 0 <= xx < ridge.shape[1] and ridge[yy, xx]:
-                    # Edge cost inversely proportional to centrality (distance value)
                     w = 1.0 / (1e-3 + 0.5 * (dist[y, x] + dist[yy, xx]))
                     G.add_edge((y, x), (yy, xx), weight=w)
 
-    # Find two endpoints that maximize weighted path length
+    # Endpoints that maximize weighted path length
     lengths = dict(nx.all_pairs_dijkstra_path_length(G, weight='weight'))
     max_d, start, end = 0, None, None
     for u, dists in lengths.items():
@@ -167,16 +179,89 @@ def extract_major_ridge(mask):
             if d > max_d:
                 max_d, start, end = d, u, v
     if start is None or end is None:
-        return ridge
+        return (ridge, []) if return_path else ridge
 
+    # Ordered path
     path = nx.shortest_path(G, start, end, weight='weight')
 
-    # Create final mask
+    # Rasterize
     clean = np.zeros_like(ridge, bool)
     for (y, x) in path:
         clean[y, x] = True
 
-    return clean
+    return (clean, path) if return_path else clean
+
+def _polyline_metrics_from_path(path_xy, dist_transform=None):
+    """
+    Compute length, chord, straightness, mean curvature, and width stats
+    for an ordered list of (y, x) pixels.
+
+    Parameters
+    ----------
+    path_xy : list[(int,int)]
+        Ordered (y, x) polyline.
+    dist_transform : np.ndarray or None
+        Distance transform over the particle mask, to sample local half-widths.
+
+    Returns
+    -------
+    dict
+        {
+          "centerline_length": float,
+          "centerline_chord_length": float,
+          "centerline_straightness": float or np.nan,
+          "centerline_mean_curvature": float or np.nan,
+          "centerline_mean_width": float or np.nan,
+          "centerline_width_std": float or np.nan,
+          "centerline_n_pixels": int
+        }
+    """
+    import numpy as np
+
+    n = len(path_xy)
+    out = {
+        "centerline_length": 0.0,
+        "centerline_chord_length": 0.0,
+        "centerline_straightness": np.nan,
+        "centerline_mean_curvature": np.nan,
+        "centerline_mean_width": np.nan,
+        "centerline_width_std": np.nan,
+        "centerline_n_pixels": n
+    }
+    if n < 2:
+        return out
+
+    coords = np.array(path_xy, dtype=float)  # (y, x)
+    diffs = np.diff(coords, axis=0)
+    step_lengths = np.sqrt((diffs ** 2).sum(axis=1))
+    length = float(step_lengths.sum())
+    out["centerline_length"] = length
+
+    chord = float(np.linalg.norm(coords[-1] - coords[0]))
+    out["centerline_chord_length"] = chord
+    out["centerline_straightness"] = (chord / length) if length > 0 else np.nan
+
+    # Curvature as mean absolute angle increment between successive segments (your convention)
+    if n >= 3:
+        # Note: np.arctan2(dy, dx) with dy = delta_y, dx = delta_x
+        angles = np.arctan2(diffs[:, 0], diffs[:, 1])
+        dtheta = np.abs(np.diff(angles))
+        # wrap to [0, pi]
+        dtheta[dtheta > np.pi] -= np.pi
+        out["centerline_mean_curvature"] = float(np.mean(dtheta))
+
+    # Width sampling: use DT at path pixels (twice radius)
+    if dist_transform is not None:
+        yy = coords[:, 0].astype(int)
+        xx = coords[:, 1].astype(int)
+        valid = (yy >= 0) & (yy < dist_transform.shape[0]) & (xx >= 0) & (xx < dist_transform.shape[1])
+        if valid.any():
+            wvals = dist_transform[yy[valid], xx[valid]] * 2.0
+            out["centerline_mean_width"] = float(np.mean(wvals))
+            out["centerline_width_std"] = float(np.std(wvals))
+
+    return out
+
 
 
 def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_path,
@@ -250,12 +335,17 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
             continue
         
         # --- Geodesic centerline extraction ---
-        ridge = extract_major_ridge(mask)
-        region_ridge_pixels = np.argwhere(ridge)
-        if region_ridge_pixels.size > 0:
-            ridge_length = len(region_ridge_pixels)
-        else:
-            ridge_length = 0
+        #ridge = extract_major_ridge(mask)
+        #region_ridge_pixels = np.argwhere(ridge)
+        #if region_ridge_pixels.size > 0:
+        #    ridge_length = len(region_ridge_pixels)
+        #else:
+        #    ridge_length = 0
+
+        # New (ordered path & metrics)
+        ridge_mask, ridge_path = extract_major_ridge(mask, return_path=True)
+        region_ridge_pixels = np.argwhere(ridge_mask)
+        ridge_length = int(len(region_ridge_pixels)) if region_ridge_pixels.size > 0 else 0
 
         # Skeleton metrics
         diffs = np.diff(skel_coords, axis=0)
@@ -281,6 +371,9 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
         mean_width = float(np.mean(width_values))
         width_std = float(np.std(width_values))
 
+        # --- Centerline metrics (parallel to skeleton metrics) ---
+        centerline_metrics = _polyline_metrics_from_path(ridge_path, dist_transform=dist_transform)
+
         # Classical metrics
         contours, _ = cv2.findContours(region.convex_image.astype(np.uint8),
                                        cv2.RETR_EXTERNAL,
@@ -294,22 +387,37 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
 
         cx, cy = region.centroid[::-1]
 
+        # Assemble record
         results.append({
             "particle_id": idx,
             "X": cx,
             "Y": cy,
             "area": area,
+
+            # Skeleton-based
             "skeleton_length": skeleton_length,
             "chord_length": chord_length,
             "straightness_ratio": straightness_ratio,
             "mean_curvature": mean_curvature,
             "mean_width": mean_width,
             "width_std": width_std,
+
+            # Classical
             "solidity": solidity,
             "circularity": circularity,
-            "ridge_length": ridge_length
-        })
 
+            # Ridge extent
+            "ridge_length": ridge_length,
+
+            # New: Centerline-based
+            "centerline_length": centerline_metrics["centerline_length"],
+            "centerline_chord_length": centerline_metrics["centerline_chord_length"],
+            "centerline_straightness": centerline_metrics["centerline_straightness"],
+            "centerline_mean_curvature": centerline_metrics["centerline_mean_curvature"],
+            "centerline_mean_width": centerline_metrics["centerline_mean_width"],
+            "centerline_width_std": centerline_metrics["centerline_width_std"],
+            "centerline_n_pixels": centerline_metrics["centerline_n_pixels"],
+        })
         # Visualization overlay
         if save_outputs:
             contour = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
