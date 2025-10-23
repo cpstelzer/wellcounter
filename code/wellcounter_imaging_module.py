@@ -950,6 +950,23 @@ def count_particles(run_folder_path):
     final_table2, _, _, _, _ = run_single_analysis(frame2_idx, frame1_idx, frame3_idx, output_dir)
     final_table3, _, _, _, _ = run_single_analysis(frame3_idx, frame1_idx, frame2_idx, output_dir)
 
+    # --- Add actual reference frame numbers instead of indices ---
+    # Extract frame numbers from filenames (e.g. "_f00087_")
+    frame_numbers = [
+        int(m.group(1)) if (m := re.search(r'_f(\d+)_', os.path.basename(f))) else np.nan
+        for f in image_file_list
+    ]
+
+    # Safely assign the true frame numbers to each result table
+    ref_frame1 = frame_numbers[frame1_idx] if frame1_idx < len(frame_numbers) else np.nan
+    ref_frame2 = frame_numbers[frame2_idx] if frame2_idx < len(frame_numbers) else np.nan
+    ref_frame3 = frame_numbers[frame3_idx] if frame3_idx < len(frame_numbers) else np.nan
+
+    final_table1['ref_frame'] = ref_frame1
+    final_table2['ref_frame'] = ref_frame2
+    final_table3['ref_frame'] = ref_frame3
+
+
     # Optional post-detection shape filtering
     config = read_config()
     if config['particle_detection'].get('filter_by_shape', False):
@@ -985,11 +1002,17 @@ def count_particles(run_folder_path):
     avg_particles = round((p1 + p2 + p3) / 3, 1)
     nni = np.nanmean([nni1, nni2, nni3])
 
-    # For a robust median size, concatenate all detected particles
+    # Concatenate and compute metrics
     all_particles = pd.concat([final_table1, final_table2, final_table3], ignore_index=True)
+    # Ensure 'ref_frame' is the first column
+    cols = ['ref_frame'] + [c for c in all_particles.columns if c != 'ref_frame']
+    all_particles = all_particles[cols]
+
     median_area = all_particles['area'].median() if not all_particles.empty else np.nan
 
     print(f"\nIndividual counts: {p1}, {p2}, {p3}\nAvg particles: {avg_particles}\nMedian size: {median_area}\nNNI: {nni}")
+
+    summary_df = pd.DataFrame({'avg_particles': [avg_particles], 'median_particle_size': [median_area], 'spatial_nni': [nni]})
 
     # --- Output control ---
     config = read_config()
@@ -1028,22 +1051,15 @@ def count_particles(run_folder_path):
 
 
 
-        final_table1.to_csv(os.path.join(output_dir, 'table_of_particles.csv'), index=False)
-
+        all_particles.to_csv(os.path.join(output_dir, 'table_of_particles.csv'), index=False)
+        
         # Save summary CSV only when enabled
-        pd.DataFrame({
-            'avg_particles': [avg_particles],
-            'median_particle_size': [median_area],
-            'spatial_nni': [nni]
-        }).to_csv(os.path.join(output_dir, f"{folder_name}_particle_results.csv"), index=False)
+        summary_df.to_csv(os.path.join(output_dir, f"{folder_name}_particle_results.csv"), index=False)
 
         print(f"[count_particles] Results saved to: {output_dir}")
     else:
         print("[count_particles] particle_detection disabled — no files or folders created.")
 
     # Always return results programmatically
-    return pd.DataFrame({
-        'avg_particles': [avg_particles],
-        'median_particle_size': [median_area],
-        'spatial_nni': [nni]
-    })
+    return summary_df, all_particles
+    
