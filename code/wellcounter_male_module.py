@@ -108,7 +108,7 @@ def generate_long_exposure_image_custom(
         os.makedirs(output_dir, exist_ok=True)
 
         lei_path = os.path.join(output_dir, "LEI_males.jpg")
-        cv2.imwrite(lei_path, long_exposure_image)
+        #cv2.imwrite(lei_path, long_exposure_image)
 
         # --- Log parameter values for reproducibility ---
         log_path = os.path.join(output_dir, "LEI_males_log.txt")
@@ -264,8 +264,8 @@ def _polyline_metrics_from_path(path_xy, dist_transform=None):
 
 
 
-def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_path,
-                                             collage_metric="mean_width"):
+def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_path,                                                             
+                                             collage_metric="centerline_mean_width"):
     """
     Advanced morphological analysis of binary long-exposure images (LEI),
     quantifying 'eyelash-like' traces and creating diagnostic plots.
@@ -317,7 +317,7 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
     if save_outputs:
         overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
-    results, skeletons = [], []  # store metrics and skeletons
+    results = []  # store metrics 
 
     for idx, region in enumerate(props, start=1):
         if region.area < 10:
@@ -325,52 +325,15 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
 
         mask = (labeled == region.label).astype(np.uint8)
         area = int(region.area)
-
-        # Skeleton
-        skeleton = skeletonize(mask > 0)
-        skel_coords = np.column_stack(np.nonzero(skeleton))
-        skeletons.append(skel_coords)
-        n_pixels = len(skel_coords)
-        if n_pixels < 2:
-            continue
-        
+       
         # --- Geodesic centerline extraction ---
-        #ridge = extract_major_ridge(mask)
-        #region_ridge_pixels = np.argwhere(ridge)
-        #if region_ridge_pixels.size > 0:
-        #    ridge_length = len(region_ridge_pixels)
-        #else:
-        #    ridge_length = 0
-
-        # New (ordered path & metrics)
         ridge_mask, ridge_path = extract_major_ridge(mask, return_path=True)
         region_ridge_pixels = np.argwhere(ridge_mask)
         ridge_length = int(len(region_ridge_pixels)) if region_ridge_pixels.size > 0 else 0
 
-        # Skeleton metrics
-        diffs = np.diff(skel_coords, axis=0)
-        step_lengths = np.sqrt((diffs ** 2).sum(axis=1))
-        skeleton_length = float(step_lengths.sum())
-
-        dists = np.sqrt(((skel_coords[:, None, :] - skel_coords[None, :, :]) ** 2).sum(axis=2))
-        i, j = np.unravel_index(np.argmax(dists), dists.shape)
-        chord_length = dists[i, j]
-        straightness_ratio = chord_length / skeleton_length if skeleton_length > 0 else np.nan
-
-        if n_pixels >= 3:
-            vecs = np.diff(skel_coords.astype(float), axis=0)
-            angles = np.arctan2(vecs[:, 0], vecs[:, 1])
-            dtheta = np.abs(np.diff(angles))
-            dtheta[dtheta > np.pi] -= np.pi
-            mean_curvature = float(np.mean(dtheta))
-        else:
-            mean_curvature = np.nan
 
         dist_transform = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
-        width_values = dist_transform[skeleton] * 2
-        mean_width = float(np.mean(width_values))
-        width_std = float(np.std(width_values))
-
+        
         # --- Centerline metrics (parallel to skeleton metrics) ---
         centerline_metrics = _polyline_metrics_from_path(ridge_path, dist_transform=dist_transform)
 
@@ -394,14 +357,6 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
             "Y": cy,
             "area": area,
 
-            # Skeleton-based
-            "skeleton_length": skeleton_length,
-            "chord_length": chord_length,
-            "straightness_ratio": straightness_ratio,
-            "mean_curvature": mean_curvature,
-            "mean_width": mean_width,
-            "width_std": width_std,
-
             # Classical
             "solidity": solidity,
             "circularity": circularity,
@@ -418,20 +373,7 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
             "centerline_width_std": centerline_metrics["centerline_width_std"],
             "centerline_n_pixels": centerline_metrics["centerline_n_pixels"],
         })
-        # Visualization overlay
-        if save_outputs:
-            contour = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
-            cv2.drawContours(overlay, contour, -1, (0, 255, 0), 1)
-            hue = int(120 * straightness_ratio) if not np.isnan(straightness_ratio) else 0
-            hue = max(0, min(120, hue))
-            col = tuple(int(c) for c in cv2.cvtColor(
-                np.uint8([[[hue, 255, 255]]]), cv2.COLOR_HSV2BGR
-            )[0, 0])
-            for (y_, x_) in skel_coords:
-                cv2.circle(overlay, (int(x_), int(y_)), 0, col, 1)
-            label_text = f"{idx}:{straightness_ratio:.2f}"
-            cv2.putText(overlay, label_text, (int(cx), int(cy)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+        
 
     df = pd.DataFrame(results)
     print(f"[analyze_long_exposure_particles_advanced] Analyzed {len(df)} traces.")
@@ -440,13 +382,13 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
     if save_outputs:
         analyzed_path = os.path.join(output_dir, "LEI_males_analyzed.jpg")
         df_path = os.path.join(output_dir, "LEI_males_metrics.csv")
-        cv2.imwrite(analyzed_path, overlay)
+        #cv2.imwrite(analyzed_path, overlay)
         df.to_csv(df_path, index=False)
         print(f"[analyze_long_exposure_particles_advanced] Saved: {analyzed_path}")
         print(f"[analyze_long_exposure_particles_advanced] Saved: {df_path}")
 
 
-        # --- Diagnostic visualization: Geodesic centerline overlay ---
+    # --- Diagnostic visualization: Geodesic centerline overlay ---
     if save_outputs:
         lei_centerline_overlay = cv2.cvtColor(gray.copy(), cv2.COLOR_GRAY2BGR)
 
@@ -464,83 +406,9 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
 
 
     # ----------------------------------------------------------------------
-    # --- Subfunction: Diagnostic Collage with skeletons--------------------
-    # ----------------------------------------------------------------------
-    def create_diagnostic_collage_fixed(df, skeletons, metric="mean_width",
-                                        crop_size=250, n_cols=6):
-        """
-        Create collage of 250x250 px crops centered on LEI particle centroids,
-        extracted from the first frame and overlaid with skeleton (yellow).
-        """
-        import glob
-
-        print("[collage] Starting collage creation...")
-        try:
-            # Try to find the first frame image automatically
-            jpg_dir = os.path.join(run_folder_path, "jpg")
-            image_files = sorted(glob.glob(os.path.join(jpg_dir, "*.jpg")))
-            if not image_files:
-                print(f"[collage] No images found in {jpg_dir}. Cannot create collage.")
-                return
-            first_frame_path = image_files[0]
-            print(f"[collage] Using first frame: {first_frame_path}")
-
-            first_frame = cv2.imread(first_frame_path)
-            if first_frame is None:
-                print(f"[collage] Failed to read {first_frame_path}.")
-                return
-
-            df_sorted = df.sort_values(by=metric, ascending=True).reset_index(drop=True)
-            n_particles = len(df_sorted)
-            n_rows = int(np.ceil(n_particles / n_cols))
-            half = crop_size // 2
-            h, w = first_frame.shape[:2]
-            crops = []
-
-            for i, row in df_sorted.iterrows():
-                cx, cy = int(row["X"]), int(row["Y"])
-                x1, x2 = max(0, cx - half), min(w, cx + half)
-                y1, y2 = max(0, cy - half), min(h, cy + half)
-                crop = first_frame[y1:y2, x1:x2].copy()
-
-                # Overlay skeleton in yellow
-                skel = skeletons[int(row["particle_id"]) - 1]
-                for (yy, xx) in skel:
-                    if x1 <= xx < x2 and y1 <= yy < y2:
-                        crop[int(yy - y1), int(xx - x1)] = (0, 255, 255)
-
-                crop = cv2.resize(crop, (crop_size, crop_size))
-                cv2.putText(crop, f"{metric}={row[metric]:.2f}",
-                            (5, crop_size - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5, (255, 255, 255), 1, cv2.LINE_AA)
-                crops.append(crop)
-
-            if not crops:
-                print("[collage] No valid crops created.")
-                return
-
-            rows = []
-            for i in range(n_rows):
-                row_imgs = crops[i * n_cols:(i + 1) * n_cols]
-                if len(row_imgs) < n_cols:
-                    pad_img = np.zeros_like(row_imgs[0])
-                    row_imgs += [pad_img] * (n_cols - len(row_imgs))
-                rows.append(np.hstack(row_imgs))
-            collage = np.vstack(rows)
-
-            collage_path = os.path.join(output_dir, f"particle_collage_by_{metric}.jpg")
-            cv2.imwrite(collage_path, collage)
-            print(f"[collage] Saved diagnostic collage: {collage_path}")
-
-        except Exception as e:
-            import traceback
-            print(f"[collage] Error while creating collage:\n{traceback.format_exc()}")
-
-
-    # ----------------------------------------------------------------------
     # --- Subfunction: Diagnostic Collage with geodesic centerlines --------
     # ----------------------------------------------------------------------
-    def create_diagnostic_collage_centerline(df, metric="mean_width",
+    def create_diagnostic_collage_centerline(df, metric="centerline_mean_width",
                                             crop_size=250, n_cols=6):
         """
         Create collage of 250x250 px crops centered on LEI particle centroids,
@@ -623,8 +491,7 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
 
     # Run collage creation if configured
     if save_outputs:
-        create_diagnostic_collage_fixed(df, skeletons, metric=collage_metric)
-        create_diagnostic_collage_centerline(df, metric="mean_width",
+        create_diagnostic_collage_centerline(df, metric="centerline_mean_width",
                                             crop_size=250, n_cols=6)
 
     return df
