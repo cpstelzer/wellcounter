@@ -25,16 +25,22 @@ from skimage.measure import label, regionprops
 from math import pi
 import networkx as nx
 from skimage.morphology import thin
+from typing import Optional
 import wellcounter_motion_module as wmm
 import wellcounter_imaging_module as wim
 import os
+
+
+_LAST_LEI_METADATA = {}
     
 
 def generate_long_exposure_image_custom(
     run_folder_path,
     analysis_duration: float = 0.5,
     microorganism_threshold: int = 12,
-    min_microorganism_area: int = 105
+    min_microorganism_area: int = 105,
+    ref_frame_no: int = 0,
+    rec_direction: str = 'forward'
 ):
     """
     Generate a Long Exposure Image (LEI) using configurable parameters.
@@ -55,6 +61,11 @@ def generate_long_exposure_image_custom(
         Binary threshold for detecting particles. Default is 12.
     min_microorganism_area : int, optional
         Minimum area (in px²) for detected particles. Default is 105.
+    ref_frame_no : int, optional
+        Index of the reference frame used for motion analysis. Default is 0.
+    rec_direction : {"forward", "reverse"}, optional
+        Direction of accumulation relative to the reference frame. Default is
+        "forward" (reference frame plus later frames).
 
     Returns
     -------
@@ -88,7 +99,11 @@ def generate_long_exposure_image_custom(
 
     # --- Run the standard particle recording function ---
     try:
-        result_df, long_exposure_image = wmm.record_particle_positions_from_sequence(run_folder_path)
+        result_df, long_exposure_image = wmm.record_particle_positions_from_sequence(
+            run_folder_path,
+            ref_frame_no=ref_frame_no,
+            rec_direction=rec_direction
+        )
     finally:
         # --- Always restore the original config ---
         with open(config_path, "w") as f:
@@ -117,11 +132,20 @@ def generate_long_exposure_image_custom(
             log_file.write(f"analysis_duration: {analysis_duration}\n")
             log_file.write(f"microorganism_threshold: {microorganism_threshold}\n")
             log_file.write(f"min_microorganism_area: {min_microorganism_area}\n")
+            log_file.write(f"ref_frame_no: {ref_frame_no}\n")
+            log_file.write(f"rec_direction: {rec_direction}\n")
             log_file.write(f"output_path: {lei_path}\n")
         print(f"[generate_long_exposure_image_custom] LEI saved: {lei_path}")
         print(f"[generate_long_exposure_image_custom] Parameters logged to: {log_path}")
     else:
         print("[generate_long_exposure_image_custom] particle_detection output disabled — LEI not saved.")
+
+    global _LAST_LEI_METADATA
+    _LAST_LEI_METADATA = {
+        "run_folder_path": run_folder_path,
+        "ref_frame_no": int(ref_frame_no),
+        "rec_direction": rec_direction.lower(),
+    }
 
     return result_df, long_exposure_image
 
@@ -264,14 +288,18 @@ def _polyline_metrics_from_path(path_xy, dist_transform=None):
 
 
 
-def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_path,                                                             
-                                             collage_metric="centerline_mean_width"):
+def analyze_long_exposure_particles_advanced(
+    long_exposure_image,
+    run_folder_path,
+    collage_metric="centerline_mean_width",
+    ref_frame_no: Optional[int] = None,
+):
     """
     Advanced morphological analysis of binary long-exposure images (LEI),
     quantifying 'eyelash-like' traces and creating diagnostic plots.
 
     Adds a subfunction that builds a collage of fixed-size (250x250 px)
-    cropped regions from the first frame, centered on each LEI particle
+    cropped regions from the reference frame, centered on each LEI particle
     and overlaid with its skeleton.
 
     Parameters
@@ -282,13 +310,32 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
         Path to the run folder (used to locate output and input images).
     collage_metric : str, optional
         Column name in metrics DataFrame to sort the collage by.
+    ref_frame_no : int, optional
+        Index of the reference frame used when the LEI was generated. If omitted,
+        the routine attempts to reuse the most recent value supplied to
+        ``generate_long_exposure_image_custom`` for the same ``run_folder_path``.
 
     Returns
     -------
     pandas.DataFrame
         Metrics per particle.
     """
-    
+
+    if ref_frame_no is None:
+        metadata = {}
+        if _LAST_LEI_METADATA.get("run_folder_path") == run_folder_path:
+            metadata = _LAST_LEI_METADATA
+        resolved_ref_frame_no = int(metadata.get("ref_frame_no", 0))
+    else:
+        resolved_ref_frame_no = int(ref_frame_no)
+
+    if resolved_ref_frame_no < 0:
+        print(
+            f"[analyze_long_exposure_particles_advanced] Warning: ref_frame_no {resolved_ref_frame_no} is negative. "
+            "Clamping to 0 for diagnostics."
+        )
+        resolved_ref_frame_no = 0
+
     # --- Load config ---
     try:
         with open("wellcounter_config.yml", "r") as f:
@@ -409,28 +456,36 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
     # --- Subfunction: Diagnostic Collage with geodesic centerlines --------
     # ----------------------------------------------------------------------
     def create_diagnostic_collage_centerline(df, metric="centerline_mean_width",
-                                            crop_size=250, n_cols=6):
+                                             crop_size=250, n_cols=6):
         """
         Create collage of 250x250 px crops centered on LEI particle centroids,
-        extracted from the first frame and overlaid with geodesic centerlines (green).
+        extracted from the reference frame and overlaid with geodesic centerlines (green).
         Otherwise identical to create_diagnostic_collage_fixed().
         """
         import glob
 
         print("[collage_centerline] Starting centerline collage creation...")
         try:
-            # Locate first frame
+            # Locate reference frame
             jpg_dir = os.path.join(run_folder_path, "jpg")
             image_files = sorted(glob.glob(os.path.join(jpg_dir, "*.jpg")))
             if not image_files:
                 print(f"[collage_centerline] No images found in {jpg_dir}. Cannot create collage.")
                 return
-            first_frame_path = image_files[0]
-            print(f"[collage_centerline] Using first frame: {first_frame_path}")
+            clamped_idx = max(0, min(resolved_ref_frame_no, len(image_files) - 1))
+            if clamped_idx != resolved_ref_frame_no:
+                print(
+                    "[collage_centerline] Warning: requested ref_frame_no "
+                    f"{resolved_ref_frame_no} outside available range. Using {clamped_idx} instead."
+                )
+            reference_frame_path = image_files[clamped_idx]
+            print(
+                f"[collage_centerline] Using reference frame index {clamped_idx}: {reference_frame_path}"
+            )
 
-            first_frame = cv2.imread(first_frame_path)
-            if first_frame is None:
-                print(f"[collage_centerline] Failed to read {first_frame_path}.")
+            reference_frame = cv2.imread(reference_frame_path)
+            if reference_frame is None:
+                print(f"[collage_centerline] Failed to read {reference_frame_path}.")
                 return
 
             # Sort and prepare layout
@@ -438,14 +493,14 @@ def analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_pat
             n_particles = len(df_sorted)
             n_rows = int(np.ceil(n_particles / n_cols))
             half = crop_size // 2
-            h, w = first_frame.shape[:2]
+            h, w = reference_frame.shape[:2]
             crops = []
 
             for i, row in df_sorted.iterrows():
                 cx, cy = int(row["X"]), int(row["Y"])
                 x1, x2 = max(0, cx - half), min(w, cx + half)
                 y1, y2 = max(0, cy - half), min(h, cy + half)
-                crop = first_frame[y1:y2, x1:x2].copy()
+                crop = reference_frame[y1:y2, x1:x2].copy()
 
                 # --- Overlay geodesic centerline (in bright green) ---
                 local_mask = np.zeros((h, w), dtype=np.uint8)
