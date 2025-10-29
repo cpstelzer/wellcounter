@@ -102,11 +102,35 @@ def summarize_movement_variables(mov_vars_df):
 
 # --- MODIFIED HIGH-LEVEL FUNCTIONS ---
 
-def record_particle_positions_from_sequence(run_folder_path):
+def record_particle_positions_from_sequence(
+    run_folder_path,
+    ref_frame_no: int = 0,
+    rec_direction: str = 'forward'
+):
+    """Record particle positions and accumulate a long-exposure image.
+
+    Parameters
+    ----------
+    run_folder_path : str
+        Path to the run folder containing the image sequence (expects subfolder 'jpg').
+    ref_frame_no : int, optional
+        Index of the reference frame that anchors the analysis window. Defaults to 0
+        (the first frame).
+    rec_direction : {"forward", "reverse"}, optional
+        Direction in which frames are sampled relative to ``ref_frame_no``. Use
+        ``"forward"`` to include the reference frame and later frames, or
+        ``"reverse"`` to include preceding frames up to the reference frame.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, numpy.ndarray | None]
+        DataFrame of detected particles and the accumulated long-exposure image.
+    """
+
     config = wim.read_config()
     motion_params = config['motion']
 
-    # --- NEW: account for subdirectory containing images ---
+    # --- account for subdirectory containing images ---
     image_folder = os.path.join(run_folder_path, "jpg")
 
     image_file_list = wim.get_image_file_list(image_folder)
@@ -116,34 +140,72 @@ def record_particle_positions_from_sequence(run_folder_path):
     if total_frames == 0:
         return pd.DataFrame(), None
 
-    first_frame = wim.get_frame_from_sequence(image_file_list, 0)
-    _, global_mask = wim.mask_well_area(first_frame)
+    if ref_frame_no < 0 or ref_frame_no >= total_frames:
+        print(
+            f"[record_particle_positions_from_sequence] Warning: ref_frame_no {ref_frame_no} "
+            f"out of bounds for {total_frames} frames. Falling back to 0."
+        )
+        ref_frame_no = 0
 
-    if first_frame is None:
+    direction = rec_direction.lower()
+    if direction not in {"forward", "reverse"}:
+        raise ValueError(
+            f"Invalid rec_direction '{rec_direction}'. Expected 'forward' or 'reverse'."
+        )
+
+    reference_frame = wim.get_frame_from_sequence(image_file_list, ref_frame_no)
+    if reference_frame is None:
         return pd.DataFrame(), None
 
-    height, width = first_frame.shape
-    number_of_iterations = min(int(motion_params['analysis_duration'] * fps), total_frames - 1)
+    _, global_mask = wim.mask_well_area(reference_frame)
+
+    height, width = reference_frame.shape
     long_exposure_image = np.zeros((height, width), dtype=np.uint8)
     result_df = pd.DataFrame()
+
     subtraction_offset = int(5 * fps)
+    step = 1 if direction == "forward" else -1
 
-    for i in range(number_of_iterations):
-        print(f"Motion analysis\nProcessing frame no. {i+1} of {number_of_iterations}")
-        frame_a_idx = i
-        frame_b_idx = (i + subtraction_offset) % total_frames  # --- NEW: wrap around if end reached
+    available_frames = (
+        total_frames - ref_frame_no
+        if direction == "forward"
+        else ref_frame_no + 1
+    )
+    number_of_iterations = min(int(motion_params['analysis_duration'] * fps), available_frames)
 
-        # --- NEW: Use imaging module’s standardized subtraction (with masking) ---
-        subtr_image, _ = wim.image_subtraction_from_sequence(image_file_list, frame_a_idx, frame_b_idx, cached_mask=global_mask)
+    current_idx = ref_frame_no
+    for iteration in range(number_of_iterations):
+        if current_idx < 0 or current_idx >= total_frames:
+            break
+
+        print(
+            "Motion analysis\nProcessing frame no. "
+            f"{iteration + 1} of {number_of_iterations} (frame index {current_idx})"
+        )
+
+        frame_a_idx = current_idx
+        if direction == "forward":
+            frame_b_idx = min(frame_a_idx + subtraction_offset, total_frames - 1)
+        else:
+            frame_b_idx = max(frame_a_idx - subtraction_offset, 0)
+
+        subtr_image, _ = wim.image_subtraction_from_sequence(
+            image_file_list,
+            frame_a_idx,
+            frame_b_idx,
+            cached_mask=global_mask
+        )
         if subtr_image is None:
+            current_idx += step
             continue
 
-        # --- Detect microorganisms using imaging module’s function ---
         table_of_particles, binary_image = wim.analyze_microorganisms(subtr_image)
-        table_of_particles.insert(0, 'frame', i + 1)
+        table_of_particles.insert(0, 'frame', iteration + 1)
 
         result_df = pd.concat([result_df, table_of_particles], ignore_index=True)
         long_exposure_image = cv2.add(long_exposure_image, binary_image)
+
+        current_idx += step
 
     return result_df, long_exposure_image
 
@@ -151,7 +213,9 @@ def generate_long_exposure_image_custom(
     run_folder_path,
     analysis_duration: float = 0.5,
     microorganism_threshold: int = 12,
-    min_microorganism_area: int = 105
+    min_microorganism_area: int = 105,
+    ref_frame_no: int = 0,
+    rec_direction: str = 'forward'
 ):
     """
     Generate a Long Exposure Image (LEI) using configurable parameters.
@@ -172,6 +236,11 @@ def generate_long_exposure_image_custom(
         Binary threshold for detecting particles. Default is 12.
     min_microorganism_area : int, optional
         Minimum area (in px²) for detected particles. Default is 105.
+    ref_frame_no : int, optional
+        Index of the reference frame used for motion analysis. Default is 0.
+    rec_direction : {"forward", "reverse"}, optional
+        Direction of accumulation relative to the reference frame. Default is
+        "forward" (reference frame plus later frames).
 
     Returns
     -------
@@ -208,7 +277,11 @@ def generate_long_exposure_image_custom(
 
     # --- Run the standard particle recording function ---
     try:
-        result_df, long_exposure_image = record_particle_positions_from_sequence(run_folder_path)
+        result_df, long_exposure_image = record_particle_positions_from_sequence(
+            run_folder_path,
+            ref_frame_no=ref_frame_no,
+            rec_direction=rec_direction
+        )
     finally:
         # --- Always restore the original config ---
         with open(config_path, "w") as f:
@@ -237,6 +310,8 @@ def generate_long_exposure_image_custom(
             log_file.write(f"analysis_duration: {analysis_duration}\n")
             log_file.write(f"microorganism_threshold: {microorganism_threshold}\n")
             log_file.write(f"min_microorganism_area: {min_microorganism_area}\n")
+            log_file.write(f"ref_frame_no: {ref_frame_no}\n")
+            log_file.write(f"rec_direction: {rec_direction}\n")
             log_file.write(f"output_path: {lei_path}\n")
         print(f"[generate_long_exposure_image_custom] LEI saved: {lei_path}")
         print(f"[generate_long_exposure_image_custom] Parameters logged to: {log_path}")

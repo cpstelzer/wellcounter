@@ -34,7 +34,9 @@ def generate_long_exposure_image_custom(
     run_folder_path,
     analysis_duration: float = 0.5,
     microorganism_threshold: int = 12,
-    min_microorganism_area: int = 105
+    min_microorganism_area: int = 105,
+    ref_frame_no: int = 0,
+    rec_direction: str = 'forward'
 ):
     """
     Generate a Long Exposure Image (LEI) using configurable parameters.
@@ -55,6 +57,11 @@ def generate_long_exposure_image_custom(
         Binary threshold for detecting particles. Default is 12.
     min_microorganism_area : int, optional
         Minimum area (in px²) for detected particles. Default is 105.
+    ref_frame_no : int, optional
+        Index of the reference frame used for motion analysis. Default is 0.
+    rec_direction : {"forward", "reverse"}, optional
+        Direction of accumulation relative to the reference frame. Default is
+        "forward" (reference frame plus later frames).
 
     Returns
     -------
@@ -88,7 +95,11 @@ def generate_long_exposure_image_custom(
 
     # --- Run the standard particle recording function ---
     try:
-        result_df, long_exposure_image = wmm.record_particle_positions_from_sequence(run_folder_path)
+        result_df, long_exposure_image = wmm.record_particle_positions_from_sequence(
+            run_folder_path,
+            ref_frame_no=ref_frame_no,
+            rec_direction=rec_direction
+        )
     finally:
         # --- Always restore the original config ---
         with open(config_path, "w") as f:
@@ -117,6 +128,8 @@ def generate_long_exposure_image_custom(
             log_file.write(f"analysis_duration: {analysis_duration}\n")
             log_file.write(f"microorganism_threshold: {microorganism_threshold}\n")
             log_file.write(f"min_microorganism_area: {min_microorganism_area}\n")
+            log_file.write(f"ref_frame_no: {ref_frame_no}\n")
+            log_file.write(f"rec_direction: {rec_direction}\n")
             log_file.write(f"output_path: {lei_path}\n")
         print(f"[generate_long_exposure_image_custom] LEI saved: {lei_path}")
         print(f"[generate_long_exposure_image_custom] Parameters logged to: {log_path}")
