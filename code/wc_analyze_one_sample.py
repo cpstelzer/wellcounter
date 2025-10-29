@@ -43,8 +43,9 @@ else:
     count_df,_ = wim.count_particles(run_folder_path)
 
     positions_df, long_exposure_image = wma.generate_long_exposure_image_custom(run_folder_path, 0.5, 12, 105)
-    #maledetect_df = wim.analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_path)
+    
     maledetect_df = wma.analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_path)
+    
     # Perform motion analysis
     #motion_df = wmm.perform_motion_analysis(run_folder_path)
 
@@ -54,8 +55,8 @@ else:
     print("="*40)
     print("\nParticle Count Results:")
     print(count_df)
-    #print(positions_df)
-    print(maledetect_df)
+    print(positions_df)
+    #print(maledetect_df)
     #print("\nMotion Analysis Results:")
     #print(motion_df)
     
