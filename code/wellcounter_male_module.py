@@ -18,6 +18,7 @@ import os
 import yaml
 import math
 import re
+import ast
 from scipy.spatial import distance_matrix
 import glob
 from skimage.morphology import skeletonize
@@ -28,10 +29,29 @@ from skimage.morphology import thin
 from typing import Optional
 import wellcounter_motion_module as wmm
 import wellcounter_imaging_module as wim
-import os
 
 
 _LAST_LEI_METADATA = {}
+
+
+def _infer_reference_frame_value(run_folder_path, ref_frame_index):
+    """Return the absolute frame number for a reference frame index."""
+
+    try:
+        image_folder = os.path.join(run_folder_path, "jpg")
+        image_files = wim.get_image_file_list(image_folder)
+        if 0 <= int(ref_frame_index) < len(image_files):
+            filename = os.path.basename(image_files[int(ref_frame_index)])
+            match = re.search(r"_f(\d+)_", filename)
+            if match:
+                return int(match.group(1))
+    except Exception:
+        pass
+
+    try:
+        return int(ref_frame_index)
+    except Exception:
+        return 0
 
 
 def generate_long_exposure_image_custom(
@@ -141,10 +161,27 @@ def generate_long_exposure_image_custom(
         print("[generate_long_exposure_image_custom] particle_detection output disabled — LEI not saved.")
 
     global _LAST_LEI_METADATA
+
+    ref_frame_value = None
+    frame_sequence = []
+
+    if isinstance(result_df, pd.DataFrame) and not result_df.empty:
+        if "frame" in result_df.columns:
+            try:
+                frame_sequence = sorted({int(v) for v in pd.unique(result_df["frame"]) if pd.notna(v)})
+            except Exception:
+                frame_sequence = []
+
+    if ref_frame_value is None:
+        ref_frame_value = _infer_reference_frame_value(run_folder_path, ref_frame_no)
+
     _LAST_LEI_METADATA = {
         "run_folder_path": run_folder_path,
         "ref_frame_no": int(ref_frame_no),
         "rec_direction": rec_direction.lower(),
+        "ref_frame_value": int(ref_frame_value),
+        "ref_frame_index": int(ref_frame_no),
+        "frame_sequence": frame_sequence,
     }
 
     return result_df, long_exposure_image
@@ -338,7 +375,7 @@ def analyze_long_exposure_particles_advanced(
     if ref_frame_no is None:
         metadata = {}
         if _LAST_LEI_METADATA.get("run_folder_path") == run_folder_path:
-            metadata = _LAST_LEI_METADATA
+            metadata = _LAST_LEI_METADATA.copy()
         resolved_ref_frame_no = int(metadata.get("ref_frame_no", 0))
     else:
         resolved_ref_frame_no = int(ref_frame_no)
@@ -395,6 +432,24 @@ def analyze_long_exposure_particles_advanced(
         ridge_mask = ridge_mask.astype(bool, copy=False)
         ridge_length = int(np.count_nonzero(ridge_mask))
 
+        # Convert centerline coordinates into convenient representations
+        ridge_path_local = []
+        ridge_path_global = []
+        if ridge_path:
+            for (ry, rx) in ridge_path:
+                ry_int = int(ry)
+                rx_int = int(rx)
+                ridge_path_local.append((ry_int, rx_int))
+                ridge_path_global.append((ry_int + int(min_row), rx_int + int(min_col)))
+
+        if ridge_path_global:
+            start_global = ridge_path_global[0]
+            end_global = ridge_path_global[-1]
+        else:
+            centroid_row, centroid_col = region.centroid
+            start_global = (int(centroid_row), int(centroid_col))
+            end_global = start_global
+
 
         dist_transform = cv2.distanceTransform(mask_uint8, cv2.DIST_L2, 5)
         
@@ -420,6 +475,10 @@ def analyze_long_exposure_particles_advanced(
             "X": cx,
             "Y": cy,
             "area": area,
+            "bbox_min_row": int(min_row),
+            "bbox_min_col": int(min_col),
+            "bbox_max_row": int(max_row),
+            "bbox_max_col": int(max_col),
 
             # Classical
             "solidity": solidity,
@@ -427,6 +486,14 @@ def analyze_long_exposure_particles_advanced(
 
             # Ridge extent
             "ridge_length": ridge_length,
+
+            # Path representations
+            "centerline_path_local": ridge_path_local,
+            "centerline_path_global": ridge_path_global,
+            "centerline_start_y": int(start_global[0]),
+            "centerline_start_x": int(start_global[1]),
+            "centerline_end_y": int(end_global[0]),
+            "centerline_end_x": int(end_global[1]),
 
             # New: Centerline-based
             "centerline_length": centerline_metrics["centerline_length"],
@@ -583,3 +650,474 @@ def analyze_long_exposure_particles_advanced(
                                             diagnostics=particle_diagnostics)
 
     return df
+
+
+def _coerce_centerline_path(path_value):
+    """Normalize serialized or array-like path representations into a list of (y, x)."""
+
+    if isinstance(path_value, list):
+        cleaned = []
+        for item in path_value:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                try:
+                    cleaned.append((int(item[0]), int(item[1])))
+                except Exception:
+                    continue
+        return cleaned
+    if isinstance(path_value, tuple):
+        if len(path_value) == 2:
+            try:
+                return [(int(path_value[0]), int(path_value[1]))]
+            except Exception:
+                return []
+        return [
+            (int(item[0]), int(item[1]))
+            for item in path_value
+            if isinstance(item, (list, tuple)) and len(item) == 2
+        ]
+    if isinstance(path_value, str):
+        try:
+            parsed = ast.literal_eval(path_value)
+        except (ValueError, SyntaxError):
+            return []
+        return _coerce_centerline_path(parsed)
+    return []
+
+
+def _build_reference_window_trajectories(result_df, ref_frame_value, max_search_distance, max_order_gap=1):
+    """Link detections across frames into short trajectories surrounding the reference frame."""
+
+    if result_df is None or result_df.empty:
+        return []
+    required_cols = {"frame", "X", "Y"}
+    if not required_cols.issubset(result_df.columns):
+        missing = ", ".join(sorted(required_cols - set(result_df.columns)))
+        raise ValueError(f"result_df is missing required columns: {missing}")
+
+    frame_values = pd.unique(result_df["frame"])
+    frame_order = sorted(frame_values)
+    frame_to_order = {frame: idx for idx, frame in enumerate(frame_order)}
+    grouped = {frame: result_df[result_df["frame"] == frame] for frame in frame_order}
+
+    active_tracks = []
+    completed_tracks = []
+    next_id = 1
+
+    for frame in frame_order:
+        order_idx = frame_to_order[frame]
+        frame_rows = grouped[frame]
+
+        for row_index, row in frame_rows.iterrows():
+            row_dict = row.to_dict()
+            row_dict["_row_index"] = row_index
+            row_dict["_order_index"] = order_idx
+
+            best_track = None
+            best_distance = float(max_search_distance)
+
+            for track in active_tracks:
+                order_gap = order_idx - track["last_order_index"]
+                if order_gap <= 0 or order_gap > max_order_gap:
+                    continue
+
+                last_point = track["points"][-1]
+                try:
+                    dist = math.hypot(
+                        float(row_dict["X"]) - float(last_point["X"]),
+                        float(row_dict["Y"]) - float(last_point["Y"]),
+                    )
+                except Exception:
+                    dist = float("inf")
+
+                if dist < best_distance:
+                    best_distance = dist
+                    best_track = track
+
+            if best_track is None:
+                new_track = {
+                    "id": next_id,
+                    "points": [row_dict],
+                    "last_order_index": order_idx,
+                }
+                active_tracks.append(new_track)
+                next_id += 1
+            else:
+                best_track["points"].append(row_dict)
+                best_track["last_order_index"] = order_idx
+
+        still_active = []
+        for track in active_tracks:
+            if order_idx - track["last_order_index"] <= max_order_gap:
+                still_active.append(track)
+            else:
+                completed_tracks.append(track)
+        active_tracks = still_active
+
+    completed_tracks.extend(active_tracks)
+
+    for track in completed_tracks:
+        track["reference_index"] = None
+        for idx, point in enumerate(track["points"]):
+            try:
+                if int(point.get("frame")) == int(ref_frame_value):
+                    track["reference_index"] = idx
+                    break
+            except Exception:
+                continue
+
+    return completed_tracks
+
+
+def _score_trajectory_against_centerline(track, centerline_global_path, direction, reference_index):
+    """Compare a tracked particle trajectory against a LEI centerline path."""
+
+    if not centerline_global_path or track is None:
+        return None
+    if reference_index is None or reference_index < 0 or reference_index >= len(track["points"]):
+        return None
+
+    path_coords = np.array(centerline_global_path, dtype=float)
+    if path_coords.size == 0:
+        return None
+
+    track_coords = np.array([[float(p["Y"]), float(p["X"])] for p in track["points"]], dtype=float)
+    if track_coords.size == 0:
+        return None
+
+    track_start = track_coords[0]
+    track_end = track_coords[-1]
+    path_start = path_coords[0]
+    path_end = path_coords[-1]
+
+    endpoint_forward = float(np.linalg.norm(track_start - path_start) + np.linalg.norm(track_end - path_end))
+    endpoint_reverse = float(np.linalg.norm(track_start - path_end) + np.linalg.norm(track_end - path_start))
+
+    if endpoint_reverse < endpoint_forward:
+        path_coords = path_coords[::-1].copy()
+        endpoint_penalty = endpoint_reverse
+        flipped = True
+    else:
+        endpoint_penalty = endpoint_forward
+        flipped = False
+
+    dist_matrix = distance_matrix(track_coords, path_coords)
+    nearest_idx = np.argmin(dist_matrix, axis=1)
+    nearest_distances = dist_matrix[np.arange(len(track_coords)), nearest_idx]
+    mean_distance = float(np.mean(nearest_distances))
+    max_distance = float(np.max(nearest_distances))
+
+    idx_diff = np.diff(nearest_idx)
+    backward_steps = idx_diff[idx_diff < 0]
+    monotonic_violation_magnitude = float(np.abs(backward_steps).sum())
+    monotonic_violation_count = int((idx_diff < 0).sum())
+
+    path_segments = np.diff(path_coords, axis=0)
+    path_total_length = float(np.linalg.norm(path_segments, axis=1).sum()) if len(path_coords) >= 2 else 0.0
+    track_segments = np.diff(track_coords, axis=0)
+    track_total_length = float(np.linalg.norm(track_segments, axis=1).sum()) if len(track_coords) >= 2 else 0.0
+
+    ref_path_idx = int(nearest_idx[reference_index])
+    path_steps = max(len(path_coords) - 1, 1)
+    track_steps = max(len(track_coords) - 1, 1)
+    path_progress = ref_path_idx / path_steps
+    track_progress = reference_index / track_steps
+
+    ref_alignment = abs(path_progress - track_progress)
+    ref_distance = float(nearest_distances[reference_index])
+
+    frames_before = reference_index
+    frames_after = len(track_coords) - reference_index - 1
+    path_before = ref_path_idx
+    path_after = (len(path_coords) - 1) - ref_path_idx
+
+    denominator_track = max(frames_before + frames_after, 1)
+    denominator_path = max(path_before + path_after, 1)
+    before_fraction = frames_before / denominator_track
+    path_before_fraction = path_before / denominator_path
+    before_after_fraction_diff = abs(before_fraction - path_before_fraction)
+
+    length_ratio_difference = abs(track_total_length - path_total_length) / max(path_total_length, 1.0)
+
+    score = (
+        endpoint_penalty * 0.1
+        + mean_distance
+        + max_distance * 0.05
+        + monotonic_violation_magnitude * 1.5
+        + ref_alignment * 5.0
+        + ref_distance * 0.5
+        + length_ratio_difference * 2.0
+        + before_after_fraction_diff * 3.0
+    )
+
+    return {
+        "score": float(score),
+        "endpoint_penalty": float(endpoint_penalty),
+        "mean_distance": mean_distance,
+        "max_distance": max_distance,
+        "ref_alignment": float(ref_alignment),
+        "ref_distance": ref_distance,
+        "length_ratio_difference": float(length_ratio_difference),
+        "before_after_fraction_diff": float(before_after_fraction_diff),
+        "monotonic_violation_count": monotonic_violation_count,
+        "monotonic_violation_magnitude": float(monotonic_violation_magnitude),
+        "path_orientation_flipped": bool(flipped),
+        "path_progress_at_reference": float(path_progress),
+        "track_progress_at_reference": float(track_progress),
+        "track_total_length": float(track_total_length),
+        "path_total_length": float(path_total_length),
+        "nearest_index_sequence": nearest_idx.tolist(),
+    }
+
+
+def match_lei_traces_to_reference_particles(
+    lei_metrics_df,
+    result_df,
+    run_folder_path,
+    ref_frame_no: Optional[int] = None,
+    rec_direction: Optional[str] = None,
+    max_endpoint_distance: Optional[float] = 40.0,
+    max_mean_distance: Optional[float] = 20.0,
+    max_frame_gap: int = 1,
+):
+    """Match LEI traces to reference-frame particles and merge their metrics."""
+
+    if lei_metrics_df is None or len(lei_metrics_df) == 0:
+        return pd.DataFrame(), pd.DataFrame()
+    if result_df is None or len(result_df) == 0:
+        return pd.DataFrame(), pd.DataFrame()
+
+    if "centerline_path_global" not in lei_metrics_df.columns:
+        raise ValueError(
+            "LEI metrics must include 'centerline_path_global'. Run "
+            "analyze_long_exposure_particles_advanced before matching."
+        )
+
+    metadata = {}
+    if _LAST_LEI_METADATA.get("run_folder_path") == run_folder_path:
+        metadata = _LAST_LEI_METADATA.copy()
+
+    resolved_direction = rec_direction or metadata.get("rec_direction") or "forward"
+    resolved_direction = resolved_direction.lower()
+    if resolved_direction not in {"forward", "reverse"}:
+        raise ValueError("rec_direction must be 'forward' or 'reverse'")
+
+    if ref_frame_no is None:
+        ref_frame_no = int(metadata.get("ref_frame_no", 0))
+    else:
+        ref_frame_no = int(ref_frame_no)
+
+    frame_sequence = metadata.get("frame_sequence")
+    if not frame_sequence:
+        try:
+            frame_sequence = sorted({
+                int(v)
+                for v in pd.unique(result_df.get("frame", pd.Series(dtype=int)))
+                if pd.notna(v)
+            })
+        except Exception:
+            frame_sequence = []
+
+    ref_frame_value = metadata.get("ref_frame_value")
+    if ref_frame_value is None and frame_sequence:
+        try:
+            ref_frame_value = int(frame_sequence[0])
+        except Exception:
+            ref_frame_value = None
+
+    if ref_frame_value is None:
+        ref_frame_value = _infer_reference_frame_value(run_folder_path, ref_frame_no)
+
+    if ref_frame_value is None:
+        raise ValueError("Unable to determine the reference frame value from the provided data.")
+
+    config = wim.read_config()
+    motion_params = config.get("motion", {})
+    max_search_distance = float(motion_params.get("max_search_distance", 50.0))
+
+    trajectories = _build_reference_window_trajectories(
+        result_df,
+        ref_frame_value,
+        max_search_distance=max_search_distance,
+        max_order_gap=max(1, int(max_frame_gap)),
+    )
+
+    candidate_tracks = [t for t in trajectories if t.get("reference_index") is not None]
+    if not candidate_tracks:
+        raise ValueError("No trajectories overlap the reference frame; cannot perform matching.")
+
+    track_lookup = {track["id"]: track for track in candidate_tracks}
+
+    lei_metrics_by_id = None
+    if "particle_id" in lei_metrics_df.columns:
+        lei_metrics_by_id = lei_metrics_df.set_index("particle_id", drop=False)
+    else:
+        raise ValueError("lei_metrics_df must contain a 'particle_id' column.")
+
+    candidate_matches = []
+
+    for _, lei_row in lei_metrics_df.iterrows():
+        particle_id = int(lei_row.get("particle_id", -1))
+        if particle_id < 0:
+            continue
+
+        path_value = _coerce_centerline_path(lei_row.get("centerline_path_global", []))
+        if not path_value:
+            continue
+
+        for track in candidate_tracks:
+            score_info = _score_trajectory_against_centerline(
+                track,
+                path_value,
+                resolved_direction,
+                track.get("reference_index"),
+            )
+            if score_info is None:
+                continue
+
+            if max_endpoint_distance is not None and score_info["endpoint_penalty"] > max_endpoint_distance:
+                continue
+            if max_mean_distance is not None and score_info["mean_distance"] > max_mean_distance:
+                continue
+
+            ref_point = track["points"][track["reference_index"]]
+            candidate_matches.append({
+                "lei_particle_id": particle_id,
+                "track_id": track["id"],
+                "ref_row_index": ref_point.get("_row_index"),
+                "trajectory_length": len(track["points"]),
+                "centerline_length": float(lei_row.get("centerline_length", np.nan)),
+                **score_info,
+            })
+
+    if not candidate_matches:
+        raise ValueError("No candidate matches satisfy the geometric constraints.")
+
+    candidate_matches.sort(key=lambda x: (x["score"], x["mean_distance"]))
+
+    assigned_lei = set()
+    assigned_tracks = set()
+    final_matches = []
+
+    for candidate in candidate_matches:
+        lei_id = candidate["lei_particle_id"]
+        track_id = candidate["track_id"]
+        if lei_id in assigned_lei or track_id in assigned_tracks:
+            continue
+        assigned_lei.add(lei_id)
+        assigned_tracks.add(track_id)
+        final_matches.append(candidate)
+
+    ref_mask = result_df["frame"] == ref_frame_value
+    ref_frame_particles = result_df.loc[ref_mask]
+
+    merged_records = []
+
+    for match in final_matches:
+        lei_id = match["lei_particle_id"]
+        track_id = match["track_id"]
+        track = track_lookup[track_id]
+        ref_index = match.get("ref_row_index")
+        if ref_index is None or ref_index not in result_df.index:
+            continue
+
+        lei_row = lei_metrics_by_id.loc[lei_id]
+        ref_row = result_df.loc[ref_index]
+
+        combined = {
+            "match_score": match["score"],
+            "match_mean_distance": match["mean_distance"],
+            "match_endpoint_penalty": match["endpoint_penalty"],
+            "match_ref_alignment": match["ref_alignment"],
+            "match_length_ratio_difference": match["length_ratio_difference"],
+            "match_before_after_fraction_diff": match["before_after_fraction_diff"],
+            "match_monotonic_violation_count": match["monotonic_violation_count"],
+            "match_monotonic_violation_magnitude": match["monotonic_violation_magnitude"],
+            "match_path_orientation_flipped": match["path_orientation_flipped"],
+            "match_track_total_length": match["track_total_length"],
+            "match_centerline_total_length": match["path_total_length"],
+            "lei_particle_id": lei_id,
+            "ref_row_index": ref_index,
+            "matched_track_id": track_id,
+            "reference_frame_value": ref_frame_value,
+        }
+
+        for col in lei_metrics_df.columns:
+            combined[f"LEI_{col}"] = lei_row[col]
+        for col in result_df.columns:
+            combined[f"REF_{col}"] = ref_row[col]
+
+        merged_records.append(combined)
+
+    merged_df = pd.DataFrame(merged_records)
+
+    matched_ref_indices = {match["ref_row_index"] for match in final_matches if match.get("ref_row_index") is not None}
+    matched_lei_ids = {match["lei_particle_id"] for match in final_matches}
+
+    association_records = []
+    for match in final_matches:
+        association_records.append({
+            "status": "matched",
+            "lei_particle_id": match["lei_particle_id"],
+            "ref_row_index": match["ref_row_index"],
+            "track_id": match["track_id"],
+            "match_score": match["score"],
+            "match_mean_distance": match["mean_distance"],
+            "match_endpoint_penalty": match["endpoint_penalty"],
+            "match_ref_alignment": match["ref_alignment"],
+            "match_length_ratio_difference": match["length_ratio_difference"],
+            "match_before_after_fraction_diff": match["before_after_fraction_diff"],
+            "match_monotonic_violation_count": match["monotonic_violation_count"],
+            "match_monotonic_violation_magnitude": match["monotonic_violation_magnitude"],
+            "match_path_orientation_flipped": match["path_orientation_flipped"],
+            "match_track_total_length": match["track_total_length"],
+            "match_centerline_total_length": match["path_total_length"],
+            "reference_frame_value": ref_frame_value,
+        })
+
+    for ref_index in ref_frame_particles.index:
+        if ref_index in matched_ref_indices:
+            continue
+        association_records.append({
+            "status": "unmatched_reference",
+            "lei_particle_id": np.nan,
+            "ref_row_index": ref_index,
+            "track_id": np.nan,
+            "match_score": np.nan,
+            "match_mean_distance": np.nan,
+            "match_endpoint_penalty": np.nan,
+            "match_ref_alignment": np.nan,
+            "match_length_ratio_difference": np.nan,
+            "match_before_after_fraction_diff": np.nan,
+            "match_monotonic_violation_count": np.nan,
+            "match_monotonic_violation_magnitude": np.nan,
+            "match_path_orientation_flipped": np.nan,
+            "match_track_total_length": np.nan,
+            "match_centerline_total_length": np.nan,
+            "reference_frame_value": ref_frame_value,
+        })
+
+    for lei_id in lei_metrics_by_id.index:
+        if lei_id in matched_lei_ids:
+            continue
+        association_records.append({
+            "status": "unmatched_lei",
+            "lei_particle_id": lei_id,
+            "ref_row_index": np.nan,
+            "track_id": np.nan,
+            "match_score": np.nan,
+            "match_mean_distance": np.nan,
+            "match_endpoint_penalty": np.nan,
+            "match_ref_alignment": np.nan,
+            "match_length_ratio_difference": np.nan,
+            "match_before_after_fraction_diff": np.nan,
+            "match_monotonic_violation_count": np.nan,
+            "match_monotonic_violation_magnitude": np.nan,
+            "match_path_orientation_flipped": np.nan,
+            "match_track_total_length": np.nan,
+            "match_centerline_total_length": np.nan,
+            "reference_frame_value": ref_frame_value,
+        })
+
+    association_df = pd.DataFrame(association_records)
+
+    return merged_df, association_df
