@@ -42,7 +42,20 @@ else:
     # Calculate avg. number of organisms
     count_df,_ = wim.count_particles(run_folder_path)
 
-    positions_df, long_exposure_image = wma.generate_long_exposure_image_custom(run_folder_path, 0.5, 12, 105)
+    # Generate long-exposure image and analyze particles
+    analysis_duration = 0.5
+    microorganism_threshold = 12
+    min_microorganism_area = 105
+    ref_frame_no = 0
+    rec_direction = 'forward'
+
+
+    positions_df, long_exposure_image = wma.generate_long_exposure_image_custom(run_folder_path,
+                                                                                analysis_duration,
+                                                                                microorganism_threshold,
+                                                                                min_microorganism_area,
+                                                                                ref_frame_no,
+                                                                                rec_direction)
     
     maledetect_df = wma.analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_path)
     
@@ -56,7 +69,7 @@ else:
     print("\nParticle Count Results:")
     print(count_df)
     print(positions_df)
-    #print(maledetect_df)
+    print(maledetect_df)
     #print("\nMotion Analysis Results:")
     #print(motion_df)
     
