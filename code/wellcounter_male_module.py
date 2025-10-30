@@ -32,7 +32,7 @@ import os
 
 
 _LAST_LEI_METADATA = {}
-    
+
 
 def generate_long_exposure_image_custom(
     run_folder_path,
