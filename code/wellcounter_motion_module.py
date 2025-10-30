@@ -200,7 +200,7 @@ def record_particle_positions_from_sequence(
             continue
 
         table_of_particles, binary_image = wim.analyze_microorganisms(subtr_image)
-        table_of_particles.insert(0, 'frame', iteration + 1)
+        table_of_particles.insert(0, 'frame', int(frame_a_idx))
 
         result_df = pd.concat([result_df, table_of_particles], ignore_index=True)
         long_exposure_image = cv2.add(long_exposure_image, binary_image)

@@ -147,6 +147,11 @@ def generate_long_exposure_image_custom(
         "rec_direction": rec_direction.lower(),
     }
 
+    if isinstance(result_df, pd.DataFrame):
+        result_df = result_df.reset_index(drop=True)
+        if not result_df.empty:
+            result_df.index = pd.Index([""] * len(result_df))
+
     return result_df, long_exposure_image
 
 def extract_major_ridge(mask, return_path: bool = False):
