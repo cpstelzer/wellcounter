@@ -23,6 +23,7 @@ import pandas as pd
 import numpy as np
 import random
 import os
+import re
 import yaml
 
 
@@ -140,6 +141,13 @@ def record_particle_positions_from_sequence(
     if total_frames == 0:
         return pd.DataFrame(), None
 
+    # Extract the real frame numbers embedded in filenames (e.g. "_f00087_")
+    frame_number_lookup = []
+    frame_number_pattern = re.compile(r"_f(\d+)_")
+    for image_path in image_file_list:
+        match = frame_number_pattern.search(os.path.basename(image_path))
+        frame_number_lookup.append(int(match.group(1)) if match else None)
+
     if ref_frame_no < 0 or ref_frame_no >= total_frames:
         print(
             f"[record_particle_positions_from_sequence] Warning: ref_frame_no {ref_frame_no} "
@@ -200,14 +208,22 @@ def record_particle_positions_from_sequence(
             continue
 
         table_of_particles, binary_image = wim.analyze_microorganisms(subtr_image)
-        table_of_particles.insert(0, 'frame', int(frame_a_idx))
+
+        actual_frame_number = None
+        if 0 <= frame_a_idx < len(frame_number_lookup):
+            actual_frame_number = frame_number_lookup[frame_a_idx]
+        table_of_particles.insert(
+            0,
+            'frame',
+            int(actual_frame_number) if actual_frame_number is not None else int(frame_a_idx)
+        )
 
         result_df = pd.concat([result_df, table_of_particles], ignore_index=True)
         long_exposure_image = cv2.add(long_exposure_image, binary_image)
 
         current_idx += step
 
-    return result_df, long_exposure_image
+    return result_df.reset_index(drop=True), long_exposure_image
 
 def generate_long_exposure_image_custom(
     run_folder_path,

@@ -32,7 +32,23 @@ import os
 
 
 _LAST_LEI_METADATA = {}
-    
+
+
+class IndexlessDataFrame(pd.DataFrame):
+    """A DataFrame subclass that hides its index when printed or rendered."""
+
+    _metadata = []
+
+    @property
+    def _constructor(self):
+        return IndexlessDataFrame
+
+    def __repr__(self):  # pragma: no cover - visual aid only
+        return super().to_string(index=False)
+
+    def _repr_html_(self):  # pragma: no cover - visual aid only
+        return self.to_html(index=False)
+
 
 def generate_long_exposure_image_custom(
     run_folder_path,
@@ -148,9 +164,7 @@ def generate_long_exposure_image_custom(
     }
 
     if isinstance(result_df, pd.DataFrame):
-        result_df = result_df.reset_index(drop=True)
-        if not result_df.empty:
-            result_df.index = pd.Index([""] * len(result_df))
+        result_df = IndexlessDataFrame(result_df.reset_index(drop=True))
 
     return result_df, long_exposure_image
 
