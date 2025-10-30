@@ -195,18 +195,32 @@ def extract_major_ridge(mask, return_path: bool = False):
                     w = 1.0 / (1e-3 + 0.5 * (dist[y, x] + dist[yy, xx]))
                     G.add_edge((y, x), (yy, xx), weight=w)
 
-    # Endpoints that maximize weighted path length
-    lengths = dict(nx.all_pairs_dijkstra_path_length(G, weight='weight'))
-    max_d, start, end = 0, None, None
-    for u, dists in lengths.items():
-        for v, d in dists.items():
-            if d > max_d:
-                max_d, start, end = d, u, v
-    if start is None or end is None:
+    # Endpoints that maximize weighted path length (graph diameter)
+    best_path = []
+    best_length = -1.0
+    for component in nx.connected_components(G):
+        if not component:
+            continue
+        seed = next(iter(component))
+        # First pass: farthest node from arbitrary seed
+        first_lengths = nx.single_source_dijkstra_path_length(G, seed, weight="weight")
+        if not first_lengths:
+            continue
+        farthest_seed = max(first_lengths, key=first_lengths.get)
+        # Second pass: farthest node from the previously found endpoint
+        second_lengths = nx.single_source_dijkstra_path_length(G, farthest_seed, weight="weight")
+        if not second_lengths:
+            continue
+        farthest_node = max(second_lengths, key=second_lengths.get)
+        length = second_lengths[farthest_node]
+        if length > best_length:
+            best_length = length
+            best_path = nx.dijkstra_path(G, farthest_seed, farthest_node, weight="weight")
+
+    if not best_path:
         return (ridge, []) if return_path else ridge
 
-    # Ordered path
-    path = nx.shortest_path(G, start, end, weight='weight')
+    path = best_path
 
     # Rasterize
     clean = np.zeros_like(ridge, bool)
@@ -364,22 +378,25 @@ def analyze_long_exposure_particles_advanced(
     if save_outputs:
         overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
-    results = []  # store metrics 
+    results = []  # store metrics
+    particle_diagnostics = []
 
     for idx, region in enumerate(props, start=1):
         if region.area < 10:
             continue
 
-        mask = (labeled == region.label).astype(np.uint8)
+        min_row, min_col, max_row, max_col = region.bbox
+        mask = (labeled[min_row:max_row, min_col:max_col] == region.label)
+        mask_uint8 = mask.astype(np.uint8)
         area = int(region.area)
-       
+
         # --- Geodesic centerline extraction ---
-        ridge_mask, ridge_path = extract_major_ridge(mask, return_path=True)
-        region_ridge_pixels = np.argwhere(ridge_mask)
-        ridge_length = int(len(region_ridge_pixels)) if region_ridge_pixels.size > 0 else 0
+        ridge_mask, ridge_path = extract_major_ridge(mask_uint8, return_path=True)
+        ridge_mask = ridge_mask.astype(bool, copy=False)
+        ridge_length = int(np.count_nonzero(ridge_mask))
 
 
-        dist_transform = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+        dist_transform = cv2.distanceTransform(mask_uint8, cv2.DIST_L2, 5)
         
         # --- Centerline metrics (parallel to skeleton metrics) ---
         centerline_metrics = _polyline_metrics_from_path(ridge_path, dist_transform=dist_transform)
@@ -420,6 +437,15 @@ def analyze_long_exposure_particles_advanced(
             "centerline_width_std": centerline_metrics["centerline_width_std"],
             "centerline_n_pixels": centerline_metrics["centerline_n_pixels"],
         })
+
+        if save_outputs:
+            overlay_slice = overlay[min_row:max_row, min_col:max_col]
+            overlay_slice[ridge_mask] = (0, 0, 255)
+            particle_diagnostics.append({
+                "particle_id": idx,
+                "bbox": (min_row, min_col, max_row, max_col),
+                "ridge_mask": ridge_mask,
+            })
         
 
     df = pd.DataFrame(results)
@@ -439,13 +465,11 @@ def analyze_long_exposure_particles_advanced(
     if save_outputs:
         lei_centerline_overlay = cv2.cvtColor(gray.copy(), cv2.COLOR_GRAY2BGR)
 
-        for region in props:
-            mask = (labeled == region.label).astype(np.uint8)
-            ridge = extract_major_ridge(mask)
-            ys, xs = np.nonzero(ridge)
-            for y, x in zip(ys, xs):
-                if 0 <= y < lei_centerline_overlay.shape[0] and 0 <= x < lei_centerline_overlay.shape[1]:
-                    lei_centerline_overlay[y, x] = (0, 0, 255)  # red ridge pixels
+        for diag in particle_diagnostics:
+            min_row, min_col, max_row, max_col = diag["bbox"]
+            ridge = diag["ridge_mask"]
+            region_slice = lei_centerline_overlay[min_row:max_row, min_col:max_col]
+            region_slice[ridge] = (0, 0, 255)
 
         out_path_centerline = os.path.join(output_dir, "LEI_males_centerline.jpg")
         cv2.imwrite(out_path_centerline, lei_centerline_overlay)
@@ -456,7 +480,8 @@ def analyze_long_exposure_particles_advanced(
     # --- Subfunction: Diagnostic Collage with geodesic centerlines --------
     # ----------------------------------------------------------------------
     def create_diagnostic_collage_centerline(df, metric="centerline_mean_width",
-                                             crop_size=250, n_cols=6):
+                                             crop_size=250, n_cols=6,
+                                             diagnostics=None):
         """
         Create collage of 250x250 px crops centered on LEI particle centroids,
         extracted from the reference frame and overlaid with geodesic centerlines (green).
@@ -496,6 +521,8 @@ def analyze_long_exposure_particles_advanced(
             h, w = reference_frame.shape[:2]
             crops = []
 
+            diag_lookup = {d["particle_id"]: d for d in diagnostics or []}
+
             for i, row in df_sorted.iterrows():
                 cx, cy = int(row["X"]), int(row["Y"])
                 x1, x2 = max(0, cx - half), min(w, cx + half)
@@ -503,15 +530,20 @@ def analyze_long_exposure_particles_advanced(
                 crop = reference_frame[y1:y2, x1:x2].copy()
 
                 # --- Overlay geodesic centerline (in bright green) ---
-                local_mask = np.zeros((h, w), dtype=np.uint8)
-                local_mask[labeled == row["particle_id"]] = 1
-                mask_crop = local_mask[y1:y2, x1:x2]
-
-                ridge = extract_major_ridge(mask_crop)
-                ys, xs = np.nonzero(ridge)
-                for y, x in zip(ys, xs):
-                    if 0 <= y < crop.shape[0] and 0 <= x < crop.shape[1]:
-                        crop[y, x] = (0, 255, 0)
+                diag = diag_lookup.get(int(row["particle_id"]))
+                if diag:
+                    min_row, min_col, max_row, max_col = diag["bbox"]
+                    ridge = diag["ridge_mask"]
+                    overlap_y1 = max(y1, min_row)
+                    overlap_y2 = min(y2, max_row)
+                    overlap_x1 = max(x1, min_col)
+                    overlap_x2 = min(x2, max_col)
+                    if overlap_y1 < overlap_y2 and overlap_x1 < overlap_x2:
+                        ridge_sub = ridge[overlap_y1 - min_row:overlap_y2 - min_row,
+                                          overlap_x1 - min_col:overlap_x2 - min_col]
+                        crop_sub = crop[overlap_y1 - y1:overlap_y2 - y1,
+                                        overlap_x1 - x1:overlap_x2 - x1]
+                        crop_sub[ridge_sub] = (0, 255, 0)
 
                 crop = cv2.resize(crop, (crop_size, crop_size))
                 cv2.putText(crop, f"{metric}={row[metric]:.2f}",
@@ -547,6 +579,7 @@ def analyze_long_exposure_particles_advanced(
     # Run collage creation if configured
     if save_outputs:
         create_diagnostic_collage_centerline(df, metric="centerline_mean_width",
-                                            crop_size=250, n_cols=6)
+                                            crop_size=250, n_cols=6,
+                                            diagnostics=particle_diagnostics)
 
     return df
