@@ -1112,6 +1112,78 @@ def analyze_long_exposure_particles_advanced(
         return df, particle_diagnostics
     return df
 
+            # Sort and prepare layout
+            df_sorted = df.sort_values(by=metric, ascending=True).reset_index(drop=True)
+            n_particles = len(df_sorted)
+            n_rows = int(np.ceil(n_particles / n_cols))
+            half = crop_size // 2
+            h, w = reference_frame.shape[:2]
+            crops = []
+
+            diag_lookup = {d["particle_id"]: d for d in diagnostics or []}
+
+            for i, row in df_sorted.iterrows():
+                cx, cy = int(row["X"]), int(row["Y"])
+                x1, x2 = max(0, cx - half), min(w, cx + half)
+                y1, y2 = max(0, cy - half), min(h, cy + half)
+                crop = reference_frame[y1:y2, x1:x2].copy()
+
+                # --- Overlay geodesic centerline (in bright green) ---
+                diag = diag_lookup.get(int(row["particle_id"]))
+                if diag:
+                    min_row, min_col, max_row, max_col = diag["bbox"]
+                    ridge = diag["ridge_mask"]
+                    overlap_y1 = max(y1, min_row)
+                    overlap_y2 = min(y2, max_row)
+                    overlap_x1 = max(x1, min_col)
+                    overlap_x2 = min(x2, max_col)
+                    if overlap_y1 < overlap_y2 and overlap_x1 < overlap_x2:
+                        ridge_sub = ridge[overlap_y1 - min_row:overlap_y2 - min_row,
+                                          overlap_x1 - min_col:overlap_x2 - min_col]
+                        crop_sub = crop[overlap_y1 - y1:overlap_y2 - y1,
+                                        overlap_x1 - x1:overlap_x2 - x1]
+                        crop_sub[ridge_sub] = (0, 255, 0)
+
+                crop = cv2.resize(crop, (crop_size, crop_size))
+                cv2.putText(crop, f"{metric}={row[metric]:.2f}",
+                            (5, crop_size - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                crops.append(crop)
+
+            if not crops:
+                print("[collage_centerline] No valid crops created.")
+                return
+
+            # Combine all crops into grid
+            rows = []
+            for i in range(n_rows):
+                row_imgs = crops[i * n_cols:(i + 1) * n_cols]
+                if len(row_imgs) < n_cols:
+                    pad_img = np.zeros_like(row_imgs[0])
+                    row_imgs += [pad_img] * (n_cols - len(row_imgs))
+                rows.append(np.hstack(row_imgs))
+            collage = np.vstack(rows)
+
+            # Save output
+            frame_suffix = f"_frame{resolved_ref_frame_no}"
+            collage_path = os.path.join(output_dir, f"particle_collage_centerline_by_{metric}{frame_suffix}.jpg")
+            cv2.imwrite(collage_path, collage)
+            print(f"[collage_centerline] Saved: {collage_path}")
+
+        except Exception as e:
+            import traceback
+            print(f"[collage_centerline] Error while creating collage:\n{traceback.format_exc()}")
+
+
+
+    # Run collage creation if configured
+    if save_outputs:
+        create_diagnostic_collage_centerline(df, metric="centerline_mean_width",
+                                            crop_size=250, n_cols=6,
+                                            diagnostics=particle_diagnostics)
+
+    return df
+
 
 def run_male_analysis_pipeline(
     run_folder_path: str,
@@ -1175,13 +1247,11 @@ def run_male_analysis_pipeline(
         empty = pd.DataFrame()
         return positions_df, long_exposure_image, empty, empty, empty
 
-    maledetect_df, particle_diagnostics = analyze_long_exposure_particles_advanced(
+    maledetect_df = analyze_long_exposure_particles_advanced(
         long_exposure_image,
         run_folder_path,
         collage_metric=collage_metric,
         ref_frame_no=ref_frame_no,
-        return_diagnostics=True,
-        generate_collage=False,
     )
 
     merged_df, assignments_df = match_long_exposure_traces_to_reference_particles(
@@ -1236,14 +1306,5 @@ def run_male_analysis_pipeline(
         assignments_df.to_csv(assignments_path, index=False)
         print(f"[run_male_analysis_pipeline] Saved: {merged_path}")
         print(f"[run_male_analysis_pipeline] Saved: {assignments_path}")
-
-        if not merged_df.empty:
-            create_diagnostic_collage_centerline(
-                merged_df,
-                run_folder_path,
-                metric=collage_metric,
-                ref_frame_no=ref_frame_no,
-                diagnostics=particle_diagnostics,
-            )
 
     return positions_df, long_exposure_image, maledetect_df, merged_df, assignments_df
