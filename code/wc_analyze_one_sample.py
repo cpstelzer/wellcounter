@@ -58,6 +58,23 @@ else:
                                                                                 rec_direction)
     
     maledetect_df = wma.analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_path)
+
+    # --- Optional: match LEI traces back to reference-frame particles ---
+    # The matching routine links each long-exposure trace (``maledetect_df``)
+    # to the particle that seeded it in the reference frame contained in
+    # ``positions_df``.  This demonstrates how to exercise the new utilities
+    # during end-to-end analysis of a single sample.  The returned
+    # ``merged_df`` contains LEI metrics enriched with reference-frame
+    # measurements (prefixed with ``ref_``), whereas ``assignments_df``
+    # provides diagnostic information about each match (distance to the
+    # centerline, position along the trace, orientation cues, etc.).
+    merged_df, assignments_df = wma.match_long_exposure_traces_to_reference_particles(
+        positions_df,
+        maledetect_df,
+        run_folder_path=run_folder_path,
+        ref_frame_no=ref_frame_no,
+        rec_direction=rec_direction,
+    )
     
     # Perform motion analysis
     #motion_df = wmm.perform_motion_analysis(run_folder_path)
@@ -70,6 +87,10 @@ else:
     print(count_df)
     print(positions_df)
     print(maledetect_df)
+    print("\nMerged LEI/ref-frame metrics:")
+    print(merged_df)
+    print("\nTrace-to-reference assignments (diagnostics):")
+    print(assignments_df)
     #print("\nMotion Analysis Results:")
     #print(motion_df)
     
