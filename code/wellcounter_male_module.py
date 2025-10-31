@@ -19,6 +19,7 @@ import yaml
 import math
 import re
 from scipy.spatial import distance_matrix
+from scipy.optimize import linear_sum_assignment
 import glob
 from skimage.morphology import skeletonize
 from skimage.measure import label, regionprops
@@ -302,6 +303,412 @@ def _polyline_metrics_from_path(path_xy, dist_transform=None):
 
 
 
+def _path_local_to_global_xy(path_local, min_row, min_col):
+    """Convert a local (y, x) path to global (x, y) coordinates."""
+    if not path_local:
+        return np.empty((0, 2), dtype=float)
+    arr = np.asarray(path_local, dtype=float)
+    arr[:, 0] += float(min_row)
+    arr[:, 1] += float(min_col)
+    return arr[:, ::-1]  # (x, y)
+
+
+def _polyline_cumulative_lengths_xy(path_xy):
+    """Return cumulative arc-lengths for a polyline expressed in (x, y)."""
+    if path_xy.size == 0:
+        return np.zeros(1, dtype=float)
+    if path_xy.shape[0] == 1:
+        return np.array([0.0], dtype=float)
+    diffs = np.diff(path_xy, axis=0)
+    seg_lengths = np.linalg.norm(diffs, axis=1)
+    return np.concatenate(([0.0], np.cumsum(seg_lengths)))
+
+
+def _project_point_to_polyline(point_xy, path_xy, cum_lengths):
+    """Project a point onto a polyline, returning distance, arc-length, and projection."""
+    if path_xy.size == 0:
+        return float("inf"), float("nan"), (float("nan"), float("nan"))
+    if path_xy.shape[0] == 1:
+        dist = float(np.linalg.norm(point_xy - path_xy[0]))
+        return dist, 0.0, (float(path_xy[0][0]), float(path_xy[0][1]))
+
+    best_dist = float("inf")
+    best_param = 0.0
+    best_point = path_xy[0]
+
+    for i in range(path_xy.shape[0] - 1):
+        a = path_xy[i]
+        b = path_xy[i + 1]
+        ab = b - a
+        ab_len_sq = float(np.dot(ab, ab))
+        if ab_len_sq == 0.0:
+            proj = a
+            t = 0.0
+        else:
+            t = float(np.clip(np.dot(point_xy - a, ab) / ab_len_sq, 0.0, 1.0))
+            proj = a + t * ab
+        dist = float(np.linalg.norm(point_xy - proj))
+        if dist < best_dist:
+            best_dist = dist
+            best_param = float(cum_lengths[i] + t * math.sqrt(ab_len_sq))
+            best_point = proj
+
+    return best_dist, best_param, (float(best_point[0]), float(best_point[1]))
+
+
+def _collect_frame_points_near_path(frame_groups, frame_order_map, path_xy, cum_lengths, max_distance):
+    """Gather per-frame detections that lie within ``max_distance`` of a path."""
+    if path_xy.size == 0:
+        return []
+
+    collected = []
+    for frame_value, sub_df in frame_groups.items():
+        order = frame_order_map.get(int(frame_value))
+        if order is None:
+            continue
+        for idx, row in sub_df.iterrows():
+            x = row.get("X")
+            y = row.get("Y")
+            if pd.isna(x) or pd.isna(y):
+                continue
+            point = np.array([float(x), float(y)], dtype=float)
+            dist, param, _ = _project_point_to_polyline(point, path_xy, cum_lengths)
+            if dist <= max_distance:
+                collected.append((order, dist, param, idx))
+    return collected
+
+
+def _estimate_orientation_from_points(frame_param_pairs):
+    """Estimate whether path parameters increase with frame order."""
+    if not frame_param_pairs:
+        return None
+
+    sorted_pairs = sorted(frame_param_pairs, key=lambda item: item[0])
+    n = len(sorted_pairs)
+    window = max(1, n // 3)
+    early_params = [p[2] for p in sorted_pairs[:window]]
+    late_params = [p[2] for p in sorted_pairs[-window:]]
+    if not early_params or not late_params:
+        return None
+    early_mean = float(np.mean(early_params))
+    late_mean = float(np.mean(late_params))
+    if np.isclose(early_mean, late_mean, atol=1e-3):
+        return None
+    return late_mean > early_mean
+
+
+def match_long_exposure_traces_to_reference_particles(
+    result_df,
+    lei_metrics_df,
+    *,
+    run_folder_path: Optional[str] = None,
+    ref_frame_no: Optional[int] = None,
+    rec_direction: Optional[str] = None,
+    max_projection_distance: float = 25.0,
+    orientation_weight: float = 5.0,
+    track_distance: float = 20.0,
+):
+    """Match LEI traces to particles detected in the reference frame.
+
+    Parameters
+    ----------
+    result_df : pandas.DataFrame
+        Output from :func:`wellcounter_motion_module.record_particle_positions_from_sequence`.
+    lei_metrics_df : pandas.DataFrame
+        Output from :func:`analyze_long_exposure_particles_advanced`.
+    run_folder_path : str, optional
+        Used to reuse cached metadata from :func:`generate_long_exposure_image_custom`.
+    ref_frame_no : int, optional
+        Explicit reference frame index. If omitted the cached metadata is used when available.
+    rec_direction : {"forward", "reverse"}, optional
+        Recording direction. Reuses cached metadata when omitted.
+    max_projection_distance : float, optional
+        Maximum distance (in pixels) a reference particle may lie from a trace centerline
+        to be considered a candidate match.
+    orientation_weight : float, optional
+        Weight applied to the deviation along the path when scoring matches.
+    track_distance : float, optional
+        Distance threshold used to collect per-frame detections around each path while
+        estimating its temporal orientation.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, pandas.DataFrame]
+        ``(merged_df, assignments_df)`` where ``merged_df`` contains LEI metrics augmented
+        with reference-frame measurements (prefixed with ``ref_``), and ``assignments_df``
+        provides detailed scoring diagnostics per match.
+
+    Examples
+    --------
+    The helper is wired into ``wc_analyze_one_sample.py`` so you can exercise it end-to-end::
+
+        positions_df, lei_image = generate_long_exposure_image_custom(...)
+        lei_metrics = analyze_long_exposure_particles_advanced(lei_image, run_folder_path)
+        merged, diagnostics = match_long_exposure_traces_to_reference_particles(
+            positions_df,
+            lei_metrics,
+            run_folder_path=run_folder_path,
+            ref_frame_no=ref_frame_no,
+            rec_direction=rec_direction,
+        )
+
+    ``merged`` contains one row per LEI trace with the reference-frame columns prefixed by
+    ``ref_``; ``diagnostics`` exposes assignment scores for debugging or manual review.
+    """
+
+    if lei_metrics_df is None or lei_metrics_df.empty:
+        return lei_metrics_df.copy(), pd.DataFrame()
+
+    if result_df is None or result_df.empty or 'frame' not in result_df.columns:
+        raise ValueError("result_df must contain detections with a 'frame' column.")
+
+    metadata = {}
+    if run_folder_path and _LAST_LEI_METADATA.get("run_folder_path") == run_folder_path:
+        metadata = _LAST_LEI_METADATA
+
+    direction = rec_direction or metadata.get("rec_direction") or "forward"
+    direction = str(direction).lower()
+    if direction not in {"forward", "reverse"}:
+        direction = "forward"
+
+    resolved_ref_frame_no = ref_frame_no
+    if resolved_ref_frame_no is None:
+        resolved_ref_frame_no = metadata.get("ref_frame_no")
+
+    frames_numeric = pd.to_numeric(result_df['frame'], errors='coerce')
+    valid_mask = frames_numeric.notna()
+    if not valid_mask.any():
+        raise ValueError("result_df does not contain usable frame identifiers.")
+
+    work_df = result_df.loc[valid_mask].copy()
+    work_df['frame_value'] = frames_numeric.loc[valid_mask].astype(int)
+
+    unique_frames = np.sort(work_df['frame_value'].unique())
+    if direction == "reverse":
+        unique_frames = unique_frames[::-1]
+    frame_order_map = {int(frame): idx for idx, frame in enumerate(unique_frames.tolist())}
+
+    if not frame_order_map:
+        raise ValueError("No frames available to perform matching.")
+
+    reference_frame_value = unique_frames[0]
+    if resolved_ref_frame_no is not None:
+        resolved_ref_frame_no = int(resolved_ref_frame_no)
+
+    ref_df = work_df[work_df['frame_value'] == int(reference_frame_value)].copy()
+    if ref_df.empty:
+        merged = lei_metrics_df.copy()
+        merged['match_ref_source_index'] = pd.NA
+        merged['match_ref_frame'] = pd.NA
+        merged['match_score'] = np.nan
+        merged['match_distance_px'] = np.nan
+        merged['match_param_along_trace'] = np.nan
+        merged['match_expected_param'] = np.nan
+        merged['match_param_deviation'] = np.nan
+        merged['match_projected_x'] = np.nan
+        merged['match_projected_y'] = np.nan
+        merged['trace_orientation_increasing'] = pd.NA
+        merged['trace_reference_param_source'] = pd.NA
+        merged['trace_reference_expected_param'] = np.nan
+        merged['trace_reference_points_used'] = 0
+        merged['trace_total_length'] = np.nan
+        return merged, pd.DataFrame()
+
+    frame_groups = {frame: group for frame, group in work_df.groupby('frame_value')}
+
+    lei_df = lei_metrics_df.reset_index(drop=True).copy()
+    n_traces = len(lei_df)
+    n_refs = len(ref_df)
+
+    lei_df['trace_total_length'] = np.nan
+    lei_df['trace_orientation_increasing'] = pd.NA
+    lei_df['trace_reference_expected_param'] = np.nan
+    lei_df['trace_reference_param_source'] = pd.NA
+    lei_df['trace_reference_points_used'] = 0
+
+    if n_traces == 0 or n_refs == 0:
+        merged = lei_df.copy()
+        merged['match_ref_source_index'] = pd.NA
+        merged['match_ref_frame'] = pd.NA
+        merged['match_score'] = np.nan
+        merged['match_distance_px'] = np.nan
+        merged['match_param_along_trace'] = np.nan
+        merged['match_expected_param'] = np.nan
+        merged['match_param_deviation'] = np.nan
+        merged['match_projected_x'] = np.nan
+        merged['match_projected_y'] = np.nan
+        return merged, pd.DataFrame()
+
+    penalty = 1e6
+    cost_matrix = np.full((n_traces, n_refs), penalty, dtype=float)
+    pair_info = {}
+
+    ref_reset = ref_df.reset_index(drop=False).rename(columns={'index': 'ref_source_index'})
+
+    for i, lei_row in lei_df.iterrows():
+        path_local = lei_row.get('centerline_path_local', [])
+        min_row = lei_row.get('bbox_min_row')
+        min_col = lei_row.get('bbox_min_col')
+        if not path_local or pd.isna(min_row) or pd.isna(min_col):
+            continue
+
+        path_xy = _path_local_to_global_xy(path_local, min_row, min_col)
+        cum_lengths = _polyline_cumulative_lengths_xy(path_xy)
+        total_length = float(cum_lengths[-1]) if cum_lengths.size else 0.0
+        lei_df.at[i, 'trace_total_length'] = total_length if total_length > 0 else np.nan
+
+        frame_points = _collect_frame_points_near_path(
+            frame_groups,
+            frame_order_map,
+            path_xy,
+            cum_lengths,
+            max(track_distance, max_projection_distance),
+        )
+        orientation_flag = _estimate_orientation_from_points(frame_points)
+        lei_df.at[i, 'trace_orientation_increasing'] = (
+            orientation_flag if orientation_flag is not None else pd.NA
+        )
+        lei_df.at[i, 'trace_reference_points_used'] = len(frame_points)
+
+        reference_params = [p[2] for p in frame_points if p[0] == 0]
+        if reference_params:
+            expected_param = float(np.mean(reference_params))
+            source = 'reference_points'
+        elif orientation_flag is None:
+            expected_param = None
+            source = 'endpoint_min'
+        else:
+            expected_param = 0.0 if orientation_flag else total_length
+            source = 'orientation_trend'
+
+        if expected_param is not None:
+            expected_param = float(max(0.0, min(total_length, expected_param)))
+            lei_df.at[i, 'trace_reference_expected_param'] = expected_param
+        else:
+            lei_df.at[i, 'trace_reference_expected_param'] = np.nan
+        lei_df.at[i, 'trace_reference_param_source'] = source
+
+        if path_xy.size == 0:
+            continue
+
+        for j, ref_row in ref_reset.iterrows():
+            x = ref_row.get('X')
+            y = ref_row.get('Y')
+            if pd.isna(x) or pd.isna(y):
+                continue
+            point = np.array([float(x), float(y)], dtype=float)
+            dist, param, proj = _project_point_to_polyline(point, path_xy, cum_lengths)
+            if not np.isfinite(dist) or dist > max_projection_distance:
+                continue
+
+            if total_length <= 0:
+                param_norm = 0.0
+                expected = 0.0 if expected_param is None else expected_param
+            else:
+                if expected_param is None:
+                    endpoint_param = min(param, total_length - param)
+                    param_norm = endpoint_param / max(total_length, 1.0)
+                    expected = float(total_length / 2.0)
+                else:
+                    param_norm = abs(param - expected_param) / max(total_length, 1.0)
+                    expected = expected_param
+
+            score = float(dist + orientation_weight * param_norm)
+            if score >= penalty:
+                continue
+
+            cost_matrix[i, j] = score
+            pair_info[(i, j)] = {
+                'distance': dist,
+                'param': param,
+                'param_norm': param_norm,
+                'expected_param': expected,
+                'projected_point': proj,
+                'total_length': total_length,
+            }
+
+    if not pair_info:
+        merged = lei_df.copy()
+        merged['match_ref_source_index'] = pd.NA
+        merged['match_ref_frame'] = pd.NA
+        merged['match_score'] = np.nan
+        merged['match_distance_px'] = np.nan
+        merged['match_param_along_trace'] = np.nan
+        merged['match_expected_param'] = np.nan
+        merged['match_param_deviation'] = np.nan
+        merged['match_projected_x'] = np.nan
+        merged['match_projected_y'] = np.nan
+        assignments_df = pd.DataFrame()
+        return merged, assignments_df
+
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+    assignments = []
+    lei_df['match_ref_source_index'] = pd.NA
+    lei_df['match_ref_frame'] = pd.NA
+    lei_df['match_score'] = np.nan
+    lei_df['match_distance_px'] = np.nan
+    lei_df['match_param_along_trace'] = np.nan
+    lei_df['match_expected_param'] = np.nan
+    lei_df['match_param_deviation'] = np.nan
+    lei_df['match_projected_x'] = np.nan
+    lei_df['match_projected_y'] = np.nan
+
+    for r, c in zip(row_ind, col_ind):
+        info = pair_info.get((r, c))
+        cost = cost_matrix[r, c]
+        if info is None or cost >= penalty:
+            continue
+        ref_row = ref_reset.iloc[c]
+        lei_row = lei_df.iloc[r]
+
+        deviation = info['param'] - info['expected_param']
+
+        lei_df.at[r, 'match_ref_source_index'] = int(ref_row['ref_source_index'])
+        lei_df.at[r, 'match_ref_frame'] = int(ref_row['frame_value'])
+        lei_df.at[r, 'match_score'] = float(cost)
+        lei_df.at[r, 'match_distance_px'] = float(info['distance'])
+        lei_df.at[r, 'match_param_along_trace'] = float(info['param'])
+        lei_df.at[r, 'match_expected_param'] = float(info['expected_param'])
+        lei_df.at[r, 'match_param_deviation'] = float(deviation)
+        lei_df.at[r, 'match_projected_x'] = float(info['projected_point'][0])
+        lei_df.at[r, 'match_projected_y'] = float(info['projected_point'][1])
+
+        assignments.append({
+            'lei_index': int(r),
+            'lei_particle_id': lei_row.get('particle_id'),
+            'ref_source_index': int(ref_row['ref_source_index']),
+            'ref_frame_value': int(ref_row['frame_value']),
+            'match_score': float(cost),
+            'distance_px': float(info['distance']),
+            'param_along_trace': float(info['param']),
+            'expected_param': float(info['expected_param']),
+            'param_deviation': float(deviation),
+            'projected_x': float(info['projected_point'][0]),
+            'projected_y': float(info['projected_point'][1]),
+            'trace_total_length': float(info['total_length']),
+            'orientation_increasing': lei_df.at[r, 'trace_orientation_increasing'],
+        })
+
+    assignments_df = pd.DataFrame(assignments)
+
+    ref_prefixed = ref_reset.add_prefix('ref_')
+    merged = lei_df.merge(
+        ref_prefixed,
+        how='left',
+        left_on='match_ref_source_index',
+        right_on='ref_ref_source_index'
+    )
+    if 'ref_ref_source_index' in merged.columns:
+        merged = merged.drop(columns=['ref_ref_source_index'])
+
+    if resolved_ref_frame_no is not None:
+        merged['requested_ref_frame_no'] = int(resolved_ref_frame_no)
+    merged['reference_frame_value'] = int(reference_frame_value)
+    merged['recording_direction'] = direction
+
+    return merged, assignments_df
+
 def analyze_long_exposure_particles_advanced(
     long_exposure_image,
     run_folder_path,
@@ -394,10 +801,25 @@ def analyze_long_exposure_particles_advanced(
         ridge_mask, ridge_path = extract_major_ridge(mask_uint8, return_path=True)
         ridge_mask = ridge_mask.astype(bool, copy=False)
         ridge_length = int(np.count_nonzero(ridge_mask))
+        ridge_path_local = [(int(y), int(x)) for (y, x) in ridge_path]
+        if ridge_path_local:
+            start_local = ridge_path_local[0]
+            end_local = ridge_path_local[-1]
+            start_global = (
+                int(start_local[1] + min_col),
+                int(start_local[0] + min_row),
+            )
+            end_global = (
+                int(end_local[1] + min_col),
+                int(end_local[0] + min_row),
+            )
+        else:
+            start_global = None
+            end_global = None
 
 
         dist_transform = cv2.distanceTransform(mask_uint8, cv2.DIST_L2, 5)
-        
+
         # --- Centerline metrics (parallel to skeleton metrics) ---
         centerline_metrics = _polyline_metrics_from_path(ridge_path, dist_transform=dist_transform)
 
@@ -436,6 +858,13 @@ def analyze_long_exposure_particles_advanced(
             "centerline_mean_width": centerline_metrics["centerline_mean_width"],
             "centerline_width_std": centerline_metrics["centerline_width_std"],
             "centerline_n_pixels": centerline_metrics["centerline_n_pixels"],
+            "bbox_min_row": int(min_row),
+            "bbox_min_col": int(min_col),
+            "bbox_max_row": int(max_row),
+            "bbox_max_col": int(max_col),
+            "centerline_path_local": ridge_path_local,
+            "centerline_endpoint_start": start_global,
+            "centerline_endpoint_end": end_global,
         })
 
         if save_outputs:
