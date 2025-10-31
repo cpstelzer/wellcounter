@@ -79,6 +79,15 @@ else:
     # Perform motion analysis
     #motion_df = wmm.perform_motion_analysis(run_folder_path)
 
+
+     # --- Define output folder path (but don't create it yet) ---
+    parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
+    folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
+    output_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
+
+    merged_df.to_csv(os.path.join(output_dir, "merged_df.csv"), index=False)
+    assignments_df.to_csv(os.path.join(output_dir, "assignments_df.csv"), index=False)
+
     # Print the results
     print("\n" + "="*40)
     print("Analysis of", os.path.basename(run_folder_path), "complete:")
