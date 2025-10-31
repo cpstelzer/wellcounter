@@ -21,6 +21,7 @@ import re
 from scipy.spatial import distance_matrix
 from scipy.optimize import linear_sum_assignment
 import glob
+import traceback
 from skimage.morphology import skeletonize
 from skimage.measure import label, regionprops
 from math import pi
@@ -117,17 +118,19 @@ def generate_long_exposure_image_custom(
         print("[generate_long_exposure_image_custom] Failed to generate LEI.")
         return result_df, None
 
+    frame_suffix = f"_frame{int(ref_frame_no)}"
+
     if output_params.get('particle_detection', False):
         parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
         folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
         output_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
         os.makedirs(output_dir, exist_ok=True)
 
-        lei_path = os.path.join(output_dir, "LEI_males.jpg")
+        lei_path = os.path.join(output_dir, f"LEI_males{frame_suffix}.jpg")
         #cv2.imwrite(lei_path, long_exposure_image)
 
         # --- Log parameter values for reproducibility ---
-        log_path = os.path.join(output_dir, "LEI_males_log.txt")
+        log_path = os.path.join(output_dir, f"LEI_males_log{frame_suffix}.txt")
         with open(log_path, "w") as log_file:
             log_file.write("LEI generation parameters:\n")
             log_file.write(f"analysis_duration: {analysis_duration}\n")
@@ -709,19 +712,197 @@ def match_long_exposure_traces_to_reference_particles(
 
     return merged, assignments_df
 
+def create_diagnostic_collage_centerline(
+    df,
+    run_folder_path,
+    *,
+    metric: str = "centerline_mean_width",
+    ref_frame_no: Optional[int] = None,
+    crop_size: int = 250,
+    n_cols: int = 6,
+    diagnostics=None,
+):
+    """Create a diagnostic collage of reference-frame crops with overlays.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Dataframe containing at least ``X`` and ``Y`` centroid columns. The
+        ``metric`` column is used to order tiles. When available, the function
+        also looks for ``body_lengths_traveled`` to annotate travelled lengths.
+    run_folder_path : str
+        Folder that hosts the ``jpg`` image sequence used to source crops.
+    metric : str, optional
+        Column used both for sorting and for the first annotation line.
+    ref_frame_no : int, optional
+        Preferred reference frame index. Values outside the available range are
+        clamped to valid bounds.
+    crop_size : int, optional
+        Output tile size in pixels. Each crop is resized to ``crop_size`` square.
+    n_cols : int, optional
+        Number of tiles per row in the resulting collage.
+    diagnostics : list[dict], optional
+        Skeleton/centerline diagnostics produced by
+        :func:`analyze_long_exposure_particles_advanced`. When provided, the
+        ridge overlay is drawn on each crop.
+    """
+
+    print("[collage_centerline] Starting centerline collage creation...")
+
+    try:
+        jpg_dir = os.path.join(run_folder_path, "jpg")
+        image_files = sorted(glob.glob(os.path.join(jpg_dir, "*.jpg")))
+        if not image_files:
+            print(f"[collage_centerline] No images found in {jpg_dir}. Cannot create collage.")
+            return
+
+        resolved_ref = 0 if ref_frame_no is None else int(ref_frame_no)
+        clamped_idx = max(0, min(resolved_ref, len(image_files) - 1))
+        if clamped_idx != resolved_ref:
+            print(
+                "[collage_centerline] Warning: requested ref_frame_no "
+                f"{resolved_ref} outside available range. Using {clamped_idx} instead."
+            )
+
+        reference_frame_path = image_files[clamped_idx]
+        print(f"[collage_centerline] Using reference frame index {clamped_idx}: {reference_frame_path}")
+
+        reference_frame = cv2.imread(reference_frame_path)
+        if reference_frame is None:
+            print(f"[collage_centerline] Failed to read {reference_frame_path}.")
+            return
+
+        if metric in df.columns:
+            df_sorted = df.sort_values(by=metric, ascending=True).reset_index(drop=True)
+        else:
+            df_sorted = df.reset_index(drop=True)
+
+        n_particles = len(df_sorted)
+        if n_particles == 0:
+            print("[collage_centerline] No valid crops created.")
+            return
+
+        n_rows = int(np.ceil(n_particles / n_cols))
+        half = crop_size // 2
+        h, w = reference_frame.shape[:2]
+
+        diag_lookup = {}
+        if diagnostics:
+            for diag in diagnostics:
+                pid = diag.get("particle_id")
+                if pid is not None:
+                    diag_lookup[int(pid)] = diag
+
+        crops = []
+
+        for _, row in df_sorted.iterrows():
+            cx, cy = int(row.get("X", 0)), int(row.get("Y", 0))
+            x1, x2 = max(0, cx - half), min(w, cx + half)
+            y1, y2 = max(0, cy - half), min(h, cy + half)
+            crop = reference_frame[y1:y2, x1:x2].copy()
+
+            diag = diag_lookup.get(int(row.get("particle_id", -1)))
+            if diag:
+                min_row, min_col, max_row, max_col = diag["bbox"]
+                ridge = diag["ridge_mask"]
+                overlap_y1 = max(y1, min_row)
+                overlap_y2 = min(y2, max_row)
+                overlap_x1 = max(x1, min_col)
+                overlap_x2 = min(x2, max_col)
+                if overlap_y1 < overlap_y2 and overlap_x1 < overlap_x2:
+                    ridge_sub = ridge[overlap_y1 - min_row:overlap_y2 - min_row,
+                                      overlap_x1 - min_col:overlap_x2 - min_col]
+                    crop_sub = crop[overlap_y1 - y1:overlap_y2 - y1,
+                                    overlap_x1 - x1:overlap_x2 - x1]
+                    crop_sub[ridge_sub] = (0, 255, 0)
+
+            crop = cv2.resize(crop, (crop_size, crop_size))
+
+            text_lines = []
+            metric_value = row.get(metric)
+            if pd.notna(metric_value):
+                try:
+                    metric_float = float(metric_value)
+                except (TypeError, ValueError):
+                    metric_text = str(metric_value)
+                else:
+                    metric_text = f"{metric_float:.2f}" if np.isfinite(metric_float) else "--"
+                text_lines.append(f"{metric}={metric_text}")
+            else:
+                text_lines.append(f"{metric}=--")
+
+            if hasattr(row, "index") and "body_lengths_traveled" in row.index:
+                bl_value = row.get("body_lengths_traveled")
+                if pd.notna(bl_value):
+                    try:
+                        bl_float = float(bl_value)
+                    except (TypeError, ValueError):
+                        bl_text = str(bl_value)
+                    else:
+                        bl_text = f"{bl_float:.2f}" if np.isfinite(bl_float) else "--"
+                else:
+                    bl_text = "--"
+                text_lines.append(f"BL={bl_text}")
+
+            line_height = 18
+            for line_idx, line in enumerate(reversed(text_lines)):
+                y_pos = crop_size - 10 - line_height * line_idx
+                cv2.putText(
+                    crop,
+                    line,
+                    (5, max(15, y_pos)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+
+            crops.append(crop)
+
+        rows = []
+        for i in range(n_rows):
+            row_imgs = crops[i * n_cols:(i + 1) * n_cols]
+            if not row_imgs:
+                continue
+            if len(row_imgs) < n_cols:
+                pad_img = np.zeros_like(row_imgs[0])
+                row_imgs += [pad_img] * (n_cols - len(row_imgs))
+            rows.append(np.hstack(row_imgs))
+
+        if not rows:
+            print("[collage_centerline] No valid crops created.")
+            return
+
+        collage = np.vstack(rows)
+        frame_suffix = f"_frame{clamped_idx}"
+        parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
+        folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
+        output_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
+        os.makedirs(output_dir, exist_ok=True)
+        collage_path = os.path.join(
+            output_dir,
+            f"particle_collage_centerline_by_{metric}{frame_suffix}.jpg",
+        )
+        cv2.imwrite(collage_path, collage)
+        print(f"[collage_centerline] Saved: {collage_path}")
+
+    except Exception:
+        print(f"[collage_centerline] Error while creating collage:\n{traceback.format_exc()}")
+
+
 def analyze_long_exposure_particles_advanced(
     long_exposure_image,
     run_folder_path,
     collage_metric="centerline_mean_width",
     ref_frame_no: Optional[int] = None,
+    *,
+    return_diagnostics: bool = False,
+    generate_collage: bool = True,
 ):
     """
     Advanced morphological analysis of binary long-exposure images (LEI),
     quantifying 'eyelash-like' traces and creating diagnostic plots.
-
-    Adds a subfunction that builds a collage of fixed-size (250x250 px)
-    cropped regions from the reference frame, centered on each LEI particle
-    and overlaid with its skeleton.
 
     Parameters
     ----------
@@ -735,11 +916,20 @@ def analyze_long_exposure_particles_advanced(
         Index of the reference frame used when the LEI was generated. If omitted,
         the routine attempts to reuse the most recent value supplied to
         ``generate_long_exposure_image_custom`` for the same ``run_folder_path``.
+    return_diagnostics : bool, optional
+        When ``True`` the function returns a tuple ``(df, diagnostics)`` where
+        ``diagnostics`` contains per-particle skeleton overlays used for the
+        collage helper. Defaults to ``False`` for backward compatibility.
+    generate_collage : bool, optional
+        Skip automatic collage creation when ``False``. This is useful when the
+        caller wants to post-process the dataframe (e.g. add annotations) before
+        rendering the collage.
 
     Returns
     -------
-    pandas.DataFrame
-        Metrics per particle.
+    pandas.DataFrame or tuple
+        Per-particle metrics, optionally accompanied by diagnostic data when
+        ``return_diagnostics`` is set.
     """
 
     if ref_frame_no is None:
@@ -882,8 +1072,9 @@ def analyze_long_exposure_particles_advanced(
 
     # Save results
     if save_outputs:
-        analyzed_path = os.path.join(output_dir, "LEI_males_analyzed.jpg")
-        df_path = os.path.join(output_dir, "LEI_males_metrics.csv")
+        frame_suffix = f"_frame{resolved_ref_frame_no}"
+        analyzed_path = os.path.join(output_dir, f"LEI_males_analyzed{frame_suffix}.jpg")
+        df_path = os.path.join(output_dir, f"LEI_males_metrics{frame_suffix}.csv")
         #cv2.imwrite(analyzed_path, overlay)
         df.to_csv(df_path, index=False)
         print(f"[analyze_long_exposure_particles_advanced] Saved: {analyzed_path}")
@@ -900,115 +1091,159 @@ def analyze_long_exposure_particles_advanced(
             region_slice = lei_centerline_overlay[min_row:max_row, min_col:max_col]
             region_slice[ridge] = (0, 0, 255)
 
-        out_path_centerline = os.path.join(output_dir, "LEI_males_centerline.jpg")
+        frame_suffix = f"_frame{resolved_ref_frame_no}"
+        out_path_centerline = os.path.join(output_dir, f"LEI_males_centerline{frame_suffix}.jpg")
         cv2.imwrite(out_path_centerline, lei_centerline_overlay)
         print(f"[analyze_long_exposure_particles_advanced] Geodesic centerline overlay saved: {out_path_centerline}")
 
 
-    # ----------------------------------------------------------------------
-    # --- Subfunction: Diagnostic Collage with geodesic centerlines --------
-    # ----------------------------------------------------------------------
-    def create_diagnostic_collage_centerline(df, metric="centerline_mean_width",
-                                             crop_size=250, n_cols=6,
-                                             diagnostics=None):
-        """
-        Create collage of 250x250 px crops centered on LEI particle centroids,
-        extracted from the reference frame and overlaid with geodesic centerlines (green).
-        Otherwise identical to create_diagnostic_collage_fixed().
-        """
-        import glob
+    if save_outputs and generate_collage:
+        create_diagnostic_collage_centerline(
+            df,
+            run_folder_path,
+            metric=collage_metric,
+            ref_frame_no=resolved_ref_frame_no,
+            crop_size=250,
+            n_cols=6,
+            diagnostics=particle_diagnostics,
+        )
 
-        print("[collage_centerline] Starting centerline collage creation...")
+    if return_diagnostics:
+        return df, particle_diagnostics
+    return df
+
+
+def run_male_analysis_pipeline(
+    run_folder_path: str,
+    analysis_duration: float,
+    microorganism_threshold: int,
+    min_microorganism_area: int,
+    ref_frame_no: int,
+    rec_direction: str,
+    *,
+    collage_metric: str = "centerline_mean_width",
+    save_outputs: Optional[bool] = None,
+):
+    """Execute the full male-trace analysis workflow for a single sample.
+
+    The routine generates a long-exposure image, extracts trace metrics, links
+    the traces back to reference-frame detections, augments the merged
+    dataframe, and optionally persists the results to disk. All generated
+    artefacts embed the ``ref_frame_no`` in their filename to simplify manual
+    inspection of multiple reference frames.
+
+    Parameters
+    ----------
+    run_folder_path : str
+        Path to the sample run folder.
+    analysis_duration : float
+        Long-exposure accumulation window passed to
+        :func:`generate_long_exposure_image_custom`.
+    microorganism_threshold : int
+        Threshold used for particle detection during LEI generation.
+    min_microorganism_area : int
+        Minimum area threshold for particle detection during LEI generation.
+    ref_frame_no : int
+        Reference frame number used for accumulation and diagnostics.
+    rec_direction : {"forward", "reverse"}
+        Direction of accumulation relative to the reference frame.
+    collage_metric : str, optional
+        Sorting metric for the optional diagnostic collage.
+    save_outputs : bool, optional
+        When ``None`` (default) the flag follows the ``particle_detection``
+        output toggle from ``wellcounter_config.yml``. A boolean overrides the
+        configuration-driven behaviour.
+
+    Returns
+    -------
+    tuple
+        ``(positions_df, long_exposure_image, maledetect_df, merged_df,
+        assignments_df)`` corresponding to the outputs of the constituent
+        helpers, with ``merged_df`` already cleaned and augmented.
+    """
+
+    positions_df, long_exposure_image = generate_long_exposure_image_custom(
+        run_folder_path,
+        analysis_duration,
+        microorganism_threshold,
+        min_microorganism_area,
+        ref_frame_no,
+        rec_direction,
+    )
+
+    if long_exposure_image is None or positions_df is None:
+        empty = pd.DataFrame()
+        return positions_df, long_exposure_image, empty, empty, empty
+
+    maledetect_df, particle_diagnostics = analyze_long_exposure_particles_advanced(
+        long_exposure_image,
+        run_folder_path,
+        collage_metric=collage_metric,
+        ref_frame_no=ref_frame_no,
+        return_diagnostics=True,
+        generate_collage=False,
+    )
+
+    merged_df, assignments_df = match_long_exposure_traces_to_reference_particles(
+        positions_df,
+        maledetect_df,
+        run_folder_path=run_folder_path,
+        ref_frame_no=ref_frame_no,
+        rec_direction=rec_direction,
+    )
+
+    merged_df = merged_df.copy()
+    if "centerline_path_local" in merged_df.columns:
+        merged_df = merged_df.drop(columns=["centerline_path_local"])
+
+    feret_raw = merged_df.get("ref_feret_diameter")
+    centerline_raw = merged_df.get("centerline_length")
+
+    feret = (
+        pd.to_numeric(feret_raw, errors="coerce")
+        if feret_raw is not None
+        else pd.Series(np.nan, index=merged_df.index)
+    )
+    centerline_length = (
+        pd.to_numeric(centerline_raw, errors="coerce")
+        if centerline_raw is not None
+        else pd.Series(np.nan, index=merged_df.index)
+    )
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        body_lengths = centerline_length / feret.replace(0, np.nan)
+    merged_df["body_lengths_traveled"] = body_lengths
+
+    if save_outputs is None:
         try:
-            # Locate reference frame
-            jpg_dir = os.path.join(run_folder_path, "jpg")
-            image_files = sorted(glob.glob(os.path.join(jpg_dir, "*.jpg")))
-            if not image_files:
-                print(f"[collage_centerline] No images found in {jpg_dir}. Cannot create collage.")
-                return
-            clamped_idx = max(0, min(resolved_ref_frame_no, len(image_files) - 1))
-            if clamped_idx != resolved_ref_frame_no:
-                print(
-                    "[collage_centerline] Warning: requested ref_frame_no "
-                    f"{resolved_ref_frame_no} outside available range. Using {clamped_idx} instead."
-                )
-            reference_frame_path = image_files[clamped_idx]
-            print(
-                f"[collage_centerline] Using reference frame index {clamped_idx}: {reference_frame_path}"
+            with open("wellcounter_config.yml", "r") as f:
+                config = yaml.safe_load(f)
+            save_outputs_flag = bool(config.get("outputs", {}).get("particle_detection", False))
+        except Exception:
+            save_outputs_flag = False
+    else:
+        save_outputs_flag = bool(save_outputs)
+
+    if save_outputs_flag:
+        parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
+        folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
+        output_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
+        os.makedirs(output_dir, exist_ok=True)
+        frame_suffix = f"_frame{int(ref_frame_no)}"
+        merged_path = os.path.join(output_dir, f"merged_df{frame_suffix}.csv")
+        assignments_path = os.path.join(output_dir, f"assignments_df{frame_suffix}.csv")
+        merged_df.to_csv(merged_path, index=False)
+        assignments_df.to_csv(assignments_path, index=False)
+        print(f"[run_male_analysis_pipeline] Saved: {merged_path}")
+        print(f"[run_male_analysis_pipeline] Saved: {assignments_path}")
+
+        if not merged_df.empty:
+            create_diagnostic_collage_centerline(
+                merged_df,
+                run_folder_path,
+                metric=collage_metric,
+                ref_frame_no=ref_frame_no,
+                diagnostics=particle_diagnostics,
             )
 
-            reference_frame = cv2.imread(reference_frame_path)
-            if reference_frame is None:
-                print(f"[collage_centerline] Failed to read {reference_frame_path}.")
-                return
-
-            # Sort and prepare layout
-            df_sorted = df.sort_values(by=metric, ascending=True).reset_index(drop=True)
-            n_particles = len(df_sorted)
-            n_rows = int(np.ceil(n_particles / n_cols))
-            half = crop_size // 2
-            h, w = reference_frame.shape[:2]
-            crops = []
-
-            diag_lookup = {d["particle_id"]: d for d in diagnostics or []}
-
-            for i, row in df_sorted.iterrows():
-                cx, cy = int(row["X"]), int(row["Y"])
-                x1, x2 = max(0, cx - half), min(w, cx + half)
-                y1, y2 = max(0, cy - half), min(h, cy + half)
-                crop = reference_frame[y1:y2, x1:x2].copy()
-
-                # --- Overlay geodesic centerline (in bright green) ---
-                diag = diag_lookup.get(int(row["particle_id"]))
-                if diag:
-                    min_row, min_col, max_row, max_col = diag["bbox"]
-                    ridge = diag["ridge_mask"]
-                    overlap_y1 = max(y1, min_row)
-                    overlap_y2 = min(y2, max_row)
-                    overlap_x1 = max(x1, min_col)
-                    overlap_x2 = min(x2, max_col)
-                    if overlap_y1 < overlap_y2 and overlap_x1 < overlap_x2:
-                        ridge_sub = ridge[overlap_y1 - min_row:overlap_y2 - min_row,
-                                          overlap_x1 - min_col:overlap_x2 - min_col]
-                        crop_sub = crop[overlap_y1 - y1:overlap_y2 - y1,
-                                        overlap_x1 - x1:overlap_x2 - x1]
-                        crop_sub[ridge_sub] = (0, 255, 0)
-
-                crop = cv2.resize(crop, (crop_size, crop_size))
-                cv2.putText(crop, f"{metric}={row[metric]:.2f}",
-                            (5, crop_size - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5, (255, 255, 255), 1, cv2.LINE_AA)
-                crops.append(crop)
-
-            if not crops:
-                print("[collage_centerline] No valid crops created.")
-                return
-
-            # Combine all crops into grid
-            rows = []
-            for i in range(n_rows):
-                row_imgs = crops[i * n_cols:(i + 1) * n_cols]
-                if len(row_imgs) < n_cols:
-                    pad_img = np.zeros_like(row_imgs[0])
-                    row_imgs += [pad_img] * (n_cols - len(row_imgs))
-                rows.append(np.hstack(row_imgs))
-            collage = np.vstack(rows)
-
-            # Save output
-            collage_path = os.path.join(output_dir, f"particle_collage_centerline_by_{metric}.jpg")
-            cv2.imwrite(collage_path, collage)
-            print(f"[collage_centerline] Saved: {collage_path}")
-
-        except Exception as e:
-            import traceback
-            print(f"[collage_centerline] Error while creating collage:\n{traceback.format_exc()}")
-
-
-
-    # Run collage creation if configured
-    if save_outputs:
-        create_diagnostic_collage_centerline(df, metric="centerline_mean_width",
-                                            crop_size=250, n_cols=6,
-                                            diagnostics=particle_diagnostics)
-
-    return df
+    return positions_df, long_exposure_image, maledetect_df, merged_df, assignments_df
