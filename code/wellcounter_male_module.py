@@ -117,17 +117,19 @@ def generate_long_exposure_image_custom(
         print("[generate_long_exposure_image_custom] Failed to generate LEI.")
         return result_df, None
 
+    frame_suffix = f"_frame{int(ref_frame_no)}"
+
     if output_params.get('particle_detection', False):
         parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
         folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
         output_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
         os.makedirs(output_dir, exist_ok=True)
 
-        lei_path = os.path.join(output_dir, "LEI_males.jpg")
+        lei_path = os.path.join(output_dir, f"LEI_males{frame_suffix}.jpg")
         #cv2.imwrite(lei_path, long_exposure_image)
 
         # --- Log parameter values for reproducibility ---
-        log_path = os.path.join(output_dir, "LEI_males_log.txt")
+        log_path = os.path.join(output_dir, f"LEI_males_log{frame_suffix}.txt")
         with open(log_path, "w") as log_file:
             log_file.write("LEI generation parameters:\n")
             log_file.write(f"analysis_duration: {analysis_duration}\n")
@@ -882,8 +884,9 @@ def analyze_long_exposure_particles_advanced(
 
     # Save results
     if save_outputs:
-        analyzed_path = os.path.join(output_dir, "LEI_males_analyzed.jpg")
-        df_path = os.path.join(output_dir, "LEI_males_metrics.csv")
+        frame_suffix = f"_frame{resolved_ref_frame_no}"
+        analyzed_path = os.path.join(output_dir, f"LEI_males_analyzed{frame_suffix}.jpg")
+        df_path = os.path.join(output_dir, f"LEI_males_metrics{frame_suffix}.csv")
         #cv2.imwrite(analyzed_path, overlay)
         df.to_csv(df_path, index=False)
         print(f"[analyze_long_exposure_particles_advanced] Saved: {analyzed_path}")
@@ -900,7 +903,8 @@ def analyze_long_exposure_particles_advanced(
             region_slice = lei_centerline_overlay[min_row:max_row, min_col:max_col]
             region_slice[ridge] = (0, 0, 255)
 
-        out_path_centerline = os.path.join(output_dir, "LEI_males_centerline.jpg")
+        frame_suffix = f"_frame{resolved_ref_frame_no}"
+        out_path_centerline = os.path.join(output_dir, f"LEI_males_centerline{frame_suffix}.jpg")
         cv2.imwrite(out_path_centerline, lei_centerline_overlay)
         print(f"[analyze_long_exposure_particles_advanced] Geodesic centerline overlay saved: {out_path_centerline}")
 
@@ -995,7 +999,8 @@ def analyze_long_exposure_particles_advanced(
             collage = np.vstack(rows)
 
             # Save output
-            collage_path = os.path.join(output_dir, f"particle_collage_centerline_by_{metric}.jpg")
+            frame_suffix = f"_frame{resolved_ref_frame_no}"
+            collage_path = os.path.join(output_dir, f"particle_collage_centerline_by_{metric}{frame_suffix}.jpg")
             cv2.imwrite(collage_path, collage)
             print(f"[collage_centerline] Saved: {collage_path}")
 
@@ -1012,3 +1017,128 @@ def analyze_long_exposure_particles_advanced(
                                             diagnostics=particle_diagnostics)
 
     return df
+
+
+def run_male_analysis_pipeline(
+    run_folder_path: str,
+    analysis_duration: float,
+    microorganism_threshold: int,
+    min_microorganism_area: int,
+    ref_frame_no: int,
+    rec_direction: str,
+    *,
+    collage_metric: str = "centerline_mean_width",
+    save_outputs: Optional[bool] = None,
+):
+    """Execute the full male-trace analysis workflow for a single sample.
+
+    The routine generates a long-exposure image, extracts trace metrics, links
+    the traces back to reference-frame detections, augments the merged
+    dataframe, and optionally persists the results to disk. All generated
+    artefacts embed the ``ref_frame_no`` in their filename to simplify manual
+    inspection of multiple reference frames.
+
+    Parameters
+    ----------
+    run_folder_path : str
+        Path to the sample run folder.
+    analysis_duration : float
+        Long-exposure accumulation window passed to
+        :func:`generate_long_exposure_image_custom`.
+    microorganism_threshold : int
+        Threshold used for particle detection during LEI generation.
+    min_microorganism_area : int
+        Minimum area threshold for particle detection during LEI generation.
+    ref_frame_no : int
+        Reference frame number used for accumulation and diagnostics.
+    rec_direction : {"forward", "reverse"}
+        Direction of accumulation relative to the reference frame.
+    collage_metric : str, optional
+        Sorting metric for the optional diagnostic collage.
+    save_outputs : bool, optional
+        When ``None`` (default) the flag follows the ``particle_detection``
+        output toggle from ``wellcounter_config.yml``. A boolean overrides the
+        configuration-driven behaviour.
+
+    Returns
+    -------
+    tuple
+        ``(positions_df, long_exposure_image, maledetect_df, merged_df,
+        assignments_df)`` corresponding to the outputs of the constituent
+        helpers, with ``merged_df`` already cleaned and augmented.
+    """
+
+    positions_df, long_exposure_image = generate_long_exposure_image_custom(
+        run_folder_path,
+        analysis_duration,
+        microorganism_threshold,
+        min_microorganism_area,
+        ref_frame_no,
+        rec_direction,
+    )
+
+    if long_exposure_image is None or positions_df is None:
+        empty = pd.DataFrame()
+        return positions_df, long_exposure_image, empty, empty, empty
+
+    maledetect_df = analyze_long_exposure_particles_advanced(
+        long_exposure_image,
+        run_folder_path,
+        collage_metric=collage_metric,
+        ref_frame_no=ref_frame_no,
+    )
+
+    merged_df, assignments_df = match_long_exposure_traces_to_reference_particles(
+        positions_df,
+        maledetect_df,
+        run_folder_path=run_folder_path,
+        ref_frame_no=ref_frame_no,
+        rec_direction=rec_direction,
+    )
+
+    merged_df = merged_df.copy()
+    if "centerline_path_local" in merged_df.columns:
+        merged_df = merged_df.drop(columns=["centerline_path_local"])
+
+    feret_raw = merged_df.get("ref_feret_diameter")
+    centerline_raw = merged_df.get("centerline_length")
+
+    feret = (
+        pd.to_numeric(feret_raw, errors="coerce")
+        if feret_raw is not None
+        else pd.Series(np.nan, index=merged_df.index)
+    )
+    centerline_length = (
+        pd.to_numeric(centerline_raw, errors="coerce")
+        if centerline_raw is not None
+        else pd.Series(np.nan, index=merged_df.index)
+    )
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        body_lengths = centerline_length / feret.replace(0, np.nan)
+    merged_df["body_lengths_traveled"] = body_lengths
+
+    if save_outputs is None:
+        try:
+            with open("wellcounter_config.yml", "r") as f:
+                config = yaml.safe_load(f)
+            save_outputs_flag = bool(config.get("outputs", {}).get("particle_detection", False))
+        except Exception:
+            save_outputs_flag = False
+    else:
+        save_outputs_flag = bool(save_outputs)
+
+    if save_outputs_flag:
+        parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
+        folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
+        output_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
+        os.makedirs(output_dir, exist_ok=True)
+        frame_suffix = f"_frame{int(ref_frame_no)}"
+        merged_path = os.path.join(output_dir, f"merged_df{frame_suffix}.csv")
+        assignments_path = os.path.join(output_dir, f"assignments_df{frame_suffix}.csv")
+        merged_df.to_csv(merged_path, index=False)
+        assignments_df.to_csv(assignments_path, index=False)
+        print(f"[run_male_analysis_pipeline] Saved: {merged_path}")
+        print(f"[run_male_analysis_pipeline] Saved: {assignments_path}")
+
+    return positions_df, long_exposure_image, maledetect_df, merged_df, assignments_df
