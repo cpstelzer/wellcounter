@@ -50,43 +50,24 @@ else:
     rec_direction = 'forward'
 
 
-    positions_df, long_exposure_image = wma.generate_long_exposure_image_custom(run_folder_path,
-                                                                                analysis_duration,
-                                                                                microorganism_threshold,
-                                                                                min_microorganism_area,
-                                                                                ref_frame_no,
-                                                                                rec_direction)
-    
-    maledetect_df = wma.analyze_long_exposure_particles_advanced(long_exposure_image, run_folder_path)
-
-    # --- Optional: match LEI traces back to reference-frame particles ---
-    # The matching routine links each long-exposure trace (``maledetect_df``)
-    # to the particle that seeded it in the reference frame contained in
-    # ``positions_df``.  This demonstrates how to exercise the new utilities
-    # during end-to-end analysis of a single sample.  The returned
-    # ``merged_df`` contains LEI metrics enriched with reference-frame
-    # measurements (prefixed with ``ref_``), whereas ``assignments_df``
-    # provides diagnostic information about each match (distance to the
-    # centerline, position along the trace, orientation cues, etc.).
-    merged_df, assignments_df = wma.match_long_exposure_traces_to_reference_particles(
+    (
         positions_df,
+        long_exposure_image,
         maledetect_df,
-        run_folder_path=run_folder_path,
-        ref_frame_no=ref_frame_no,
-        rec_direction=rec_direction,
+        merged_df,
+        assignments_df,
+    ) = wma.run_male_analysis_pipeline(
+        run_folder_path,
+        analysis_duration,
+        microorganism_threshold,
+        min_microorganism_area,
+        ref_frame_no,
+        rec_direction,
     )
     
     # Perform motion analysis
     #motion_df = wmm.perform_motion_analysis(run_folder_path)
 
-
-     # --- Define output folder path (but don't create it yet) ---
-    parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
-    folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
-    output_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
-
-    merged_df.to_csv(os.path.join(output_dir, "merged_df.csv"), index=False)
-    assignments_df.to_csv(os.path.join(output_dir, "assignments_df.csv"), index=False)
 
     # Print the results
     print("\n" + "="*40)
