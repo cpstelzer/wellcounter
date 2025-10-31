@@ -3,6 +3,10 @@ motion:
   max_search_distance: 20
   min_trajectory_size: 5
   trajectory_random_colors: false
+male_analysis:
+  duration: 0.5
+  threshold: 12
+  min_area: 105
 optimize:
   area_from: 150
   area_step: 50

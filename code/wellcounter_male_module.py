@@ -29,7 +29,7 @@ from skimage.morphology import thin
 from typing import Optional
 import wellcounter_motion_module as wmm
 import wellcounter_imaging_module as wim
-import os
+import copy
 
 
 _LAST_LEI_METADATA = {}
@@ -37,31 +37,21 @@ _LAST_LEI_METADATA = {}
 
 def generate_long_exposure_image_custom(
     run_folder_path,
-    analysis_duration: float = 0.5,
-    microorganism_threshold: int = 12,
-    min_microorganism_area: int = 105,
     ref_frame_no: int = 0,
     rec_direction: str = 'forward'
 ):
     """
-    Generate a Long Exposure Image (LEI) using configurable parameters.
+    Generate a Long Exposure Image (LEI) using configuration-managed parameters.
 
-    This function temporarily modifies the configuration file on disk
-    to use the specified analysis_duration (in seconds) and microorganism
-    detection parameters, runs the standard
-    `record_particle_positions_from_sequence()`, and restores the original
-    configuration afterward.
+    The function temporarily modifies the configuration file on disk to use
+    the ``male_analysis`` values (duration in seconds plus particle detection
+    settings), runs the standard ``record_particle_positions_from_sequence``
+    routine, and restores the original configuration afterward.
 
     Parameters
     ----------
     run_folder_path : str
         Path to the run folder containing the image sequence (expects subfolder 'jpg').
-    analysis_duration : float, optional
-        Duration of frame accumulation in seconds. Default is 0.5 s.
-    microorganism_threshold : int, optional
-        Binary threshold for detecting particles. Default is 12.
-    min_microorganism_area : int, optional
-        Minimum area (in px²) for detected particles. Default is 105.
     ref_frame_no : int, optional
         Index of the reference frame used for motion analysis. Default is 0.
     rec_direction : {"forward", "reverse"}, optional
@@ -82,13 +72,17 @@ def generate_long_exposure_image_custom(
     config_path = "wellcounter_config.yml"
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
-    with open(config_path, "r") as f:
-        original_config = yaml.safe_load(f)
+    original_config = copy.deepcopy(config)
+
+    male_params = config.get('male_analysis', {})
+    analysis_duration = float(male_params.get('duration', 0.5))
+    microorganism_threshold = int(male_params.get('threshold', 12))
+    min_microorganism_area = int(male_params.get('min_area', 105))
 
     # --- Apply temporary parameters ---
-    config['motion']['analysis_duration'] = float(analysis_duration)
-    config['particle_detection']['microorganism_threshold'] = int(microorganism_threshold)
-    config['particle_detection']['min_microorganism_area'] = int(min_microorganism_area)
+    config['motion']['analysis_duration'] = analysis_duration
+    config['particle_detection']['microorganism_threshold'] = microorganism_threshold
+    config['particle_detection']['min_microorganism_area'] = min_microorganism_area
 
     # --- Write modified config to disk ---
     with open(config_path, "w") as f:
@@ -1117,9 +1111,6 @@ def analyze_long_exposure_particles_advanced(
 
 def run_male_analysis_pipeline(
     run_folder_path: str,
-    analysis_duration: float,
-    microorganism_threshold: int,
-    min_microorganism_area: int,
     ref_frame_no: int,
     rec_direction: str,
     *,
@@ -1132,19 +1123,15 @@ def run_male_analysis_pipeline(
     the traces back to reference-frame detections, augments the merged
     dataframe, and optionally persists the results to disk. All generated
     artefacts embed the ``ref_frame_no`` in their filename to simplify manual
-    inspection of multiple reference frames.
+    inspection of multiple reference frames. Long-exposure parameters are read
+    from the ``male_analysis`` section of ``wellcounter_config.yml`` at the
+    moment the LEI is generated, so no manual propagation of these values is
+    required.
 
     Parameters
     ----------
     run_folder_path : str
         Path to the sample run folder.
-    analysis_duration : float
-        Long-exposure accumulation window passed to
-        :func:`generate_long_exposure_image_custom`.
-    microorganism_threshold : int
-        Threshold used for particle detection during LEI generation.
-    min_microorganism_area : int
-        Minimum area threshold for particle detection during LEI generation.
     ref_frame_no : int
         Reference frame number used for accumulation and diagnostics.
     rec_direction : {"forward", "reverse"}
@@ -1166,9 +1153,6 @@ def run_male_analysis_pipeline(
 
     positions_df, long_exposure_image = generate_long_exposure_image_custom(
         run_folder_path,
-        analysis_duration,
-        microorganism_threshold,
-        min_microorganism_area,
         ref_frame_no,
         rec_direction,
     )

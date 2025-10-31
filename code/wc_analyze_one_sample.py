@@ -43,9 +43,6 @@ else:
     count_df,_ = wim.count_particles(run_folder_path)
 
     # Generate long-exposure image and analyze particles
-    analysis_duration = 0.5
-    microorganism_threshold = 12
-    min_microorganism_area = 105
     ref_frame_no = 0
     rec_direction = 'forward'
 
@@ -58,9 +55,6 @@ else:
         assignments_df,
     ) = wma.run_male_analysis_pipeline(
         run_folder_path,
-        analysis_duration,
-        microorganism_threshold,
-        min_microorganism_area,
         ref_frame_no,
         rec_direction,
     )
