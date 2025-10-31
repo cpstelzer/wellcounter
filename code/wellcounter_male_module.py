@@ -711,11 +711,179 @@ def match_long_exposure_traces_to_reference_particles(
 
     return merged, assignments_df
 
+def render_male_centerline_collage(
+    df,
+    *,
+    run_folder_path: str,
+    resolved_ref_frame_no: int,
+    output_dir: str,
+    metric: str = "centerline_mean_width",
+    crop_size: int = 250,
+    n_cols: int = 6,
+    particle_diagnostics=None,
+):
+    """Render the male diagnostic collage with centerline overlays and annotations."""
+
+    if df is None or len(df) == 0:
+        print("[collage_centerline] No particle data available for collage rendering.")
+        return
+
+    if run_folder_path is None:
+        print("[collage_centerline] Missing run folder path; cannot locate reference frames.")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    print("[collage_centerline] Starting centerline collage creation...")
+    try:
+        jpg_dir = os.path.join(run_folder_path, "jpg")
+        image_files = sorted(glob.glob(os.path.join(jpg_dir, "*.jpg")))
+        if not image_files:
+            print(f"[collage_centerline] No images found in {jpg_dir}. Cannot create collage.")
+            return
+
+        resolved_idx = int(resolved_ref_frame_no or 0)
+        clamped_idx = max(0, min(resolved_idx, len(image_files) - 1))
+        if clamped_idx != resolved_idx:
+            print(
+                "[collage_centerline] Warning: requested ref_frame_no "
+                f"{resolved_idx} outside available range. Using {clamped_idx} instead."
+            )
+
+        reference_frame_path = image_files[clamped_idx]
+        print(
+            f"[collage_centerline] Using reference frame index {clamped_idx}: {reference_frame_path}"
+        )
+
+        reference_frame = cv2.imread(reference_frame_path)
+        if reference_frame is None:
+            print(f"[collage_centerline] Failed to read {reference_frame_path}.")
+            return
+
+        df_sorted = df.sort_values(by=metric, ascending=True).reset_index(drop=True)
+        n_particles = len(df_sorted)
+        if n_particles == 0:
+            print("[collage_centerline] No particles remain after sorting; skipping collage.")
+            return
+
+        n_rows = int(np.ceil(n_particles / n_cols)) if n_particles else 0
+        half = crop_size // 2
+        h, w = reference_frame.shape[:2]
+        crops = []
+
+        diag_lookup = {}
+        if particle_diagnostics:
+            diag_lookup = {int(d.get("particle_id")): d for d in particle_diagnostics if "particle_id" in d}
+
+        for _, row in df_sorted.iterrows():
+            if {
+                "X",
+                "Y",
+                "particle_id",
+            } - set(row.index):
+                continue
+
+            cx = row.get("X")
+            cy = row.get("Y")
+            if pd.isna(cx) or pd.isna(cy):
+                continue
+
+            cx_i, cy_i = int(cx), int(cy)
+            x1, x2 = max(0, cx_i - half), min(w, cx_i + half)
+            y1, y2 = max(0, cy_i - half), min(h, cy_i + half)
+            crop = reference_frame[y1:y2, x1:x2].copy()
+
+            diag = diag_lookup.get(int(row.get("particle_id")))
+            if diag:
+                min_row, min_col, max_row, max_col = diag.get("bbox", (0, 0, 0, 0))
+                ridge = diag.get("ridge_mask")
+                if ridge is not None:
+                    overlap_y1 = max(y1, min_row)
+                    overlap_y2 = min(y2, max_row)
+                    overlap_x1 = max(x1, min_col)
+                    overlap_x2 = min(x2, max_col)
+                    if overlap_y1 < overlap_y2 and overlap_x1 < overlap_x2:
+                        ridge_sub = ridge[
+                            overlap_y1 - min_row : overlap_y2 - min_row,
+                            overlap_x1 - min_col : overlap_x2 - min_col,
+                        ]
+                        crop_sub = crop[
+                            overlap_y1 - y1 : overlap_y2 - y1,
+                            overlap_x1 - x1 : overlap_x2 - x1,
+                        ]
+                        crop_sub[ridge_sub] = (0, 255, 0)
+
+            crop = cv2.resize(crop, (crop_size, crop_size))
+
+            metric_value = row.get(metric, np.nan)
+            metric_text = f"{metric}={metric_value:.2f}" if pd.notna(metric_value) else f"{metric}=NA"
+
+            bl_value = row.get("body_lengths_traveled", np.nan)
+            bl_text = (
+                f"body_lengths_traveled={bl_value:.2f}" if pd.notna(bl_value) else "body_lengths_traveled=NA"
+            )
+
+            cv2.putText(
+                crop,
+                metric_text,
+                (5, crop_size - 22),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                crop,
+                bl_text,
+                (5, crop_size - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+            crops.append(crop)
+
+        if not crops:
+            print("[collage_centerline] No valid crops created.")
+            return
+
+        rows = []
+        for i in range(n_rows):
+            row_imgs = crops[i * n_cols : (i + 1) * n_cols]
+            if not row_imgs:
+                continue
+            if len(row_imgs) < n_cols:
+                pad_img = np.zeros_like(row_imgs[0])
+                row_imgs += [pad_img] * (n_cols - len(row_imgs))
+            rows.append(np.hstack(row_imgs))
+
+        if not rows:
+            print("[collage_centerline] No rows assembled for collage.")
+            return
+
+        collage = np.vstack(rows)
+        frame_suffix = f"_frame{int(resolved_ref_frame_no or 0)}"
+        collage_path = os.path.join(
+            output_dir, f"particle_collage_centerline_by_{metric}{frame_suffix}.jpg"
+        )
+        cv2.imwrite(collage_path, collage)
+        print(f"[collage_centerline] Saved: {collage_path}")
+
+    except Exception:
+        import traceback
+
+        print(f"[collage_centerline] Error while creating collage:\n{traceback.format_exc()}")
+
+
 def analyze_long_exposure_particles_advanced(
     long_exposure_image,
     run_folder_path,
     collage_metric="centerline_mean_width",
     ref_frame_no: Optional[int] = None,
+    *,
+    defer_collage: bool = False,
 ):
     """
     Advanced morphological analysis of binary long-exposure images (LEI),
@@ -738,10 +906,20 @@ def analyze_long_exposure_particles_advanced(
         the routine attempts to reuse the most recent value supplied to
         ``generate_long_exposure_image_custom`` for the same ``run_folder_path``.
 
+    Other Parameters
+    ----------------
+    defer_collage : bool, optional
+        When ``True`` the diagnostic collage is not written immediately. Instead,
+        the function stores the rendering context in ``DataFrame.attrs`` so the
+        caller can generate the collage after additional annotations (for
+        example ``body_lengths_traveled``) have been computed.
+
     Returns
     -------
     pandas.DataFrame
-        Metrics per particle.
+        Metrics per particle. When ``defer_collage`` is ``True`` and outputs are
+        enabled, ``df.attrs['collage_context']`` contains the parameters required
+        to render the collage later.
     """
 
     if ref_frame_no is None:
@@ -909,112 +1087,30 @@ def analyze_long_exposure_particles_advanced(
         print(f"[analyze_long_exposure_particles_advanced] Geodesic centerline overlay saved: {out_path_centerline}")
 
 
-    # ----------------------------------------------------------------------
-    # --- Subfunction: Diagnostic Collage with geodesic centerlines --------
-    # ----------------------------------------------------------------------
-    def create_diagnostic_collage_centerline(df, metric="centerline_mean_width",
-                                             crop_size=250, n_cols=6,
-                                             diagnostics=None):
-        """
-        Create collage of 250x250 px crops centered on LEI particle centroids,
-        extracted from the reference frame and overlaid with geodesic centerlines (green).
-        Otherwise identical to create_diagnostic_collage_fixed().
-        """
-        import glob
+    collage_context = {
+        "run_folder_path": run_folder_path,
+        "resolved_ref_frame_no": resolved_ref_frame_no,
+        "output_dir": output_dir,
+        "particle_diagnostics": particle_diagnostics,
+        "metric": collage_metric,
+        "crop_size": 250,
+        "n_cols": 6,
+    }
 
-        print("[collage_centerline] Starting centerline collage creation...")
-        try:
-            # Locate reference frame
-            jpg_dir = os.path.join(run_folder_path, "jpg")
-            image_files = sorted(glob.glob(os.path.join(jpg_dir, "*.jpg")))
-            if not image_files:
-                print(f"[collage_centerline] No images found in {jpg_dir}. Cannot create collage.")
-                return
-            clamped_idx = max(0, min(resolved_ref_frame_no, len(image_files) - 1))
-            if clamped_idx != resolved_ref_frame_no:
-                print(
-                    "[collage_centerline] Warning: requested ref_frame_no "
-                    f"{resolved_ref_frame_no} outside available range. Using {clamped_idx} instead."
-                )
-            reference_frame_path = image_files[clamped_idx]
-            print(
-                f"[collage_centerline] Using reference frame index {clamped_idx}: {reference_frame_path}"
-            )
-
-            reference_frame = cv2.imread(reference_frame_path)
-            if reference_frame is None:
-                print(f"[collage_centerline] Failed to read {reference_frame_path}.")
-                return
-
-            # Sort and prepare layout
-            df_sorted = df.sort_values(by=metric, ascending=True).reset_index(drop=True)
-            n_particles = len(df_sorted)
-            n_rows = int(np.ceil(n_particles / n_cols))
-            half = crop_size // 2
-            h, w = reference_frame.shape[:2]
-            crops = []
-
-            diag_lookup = {d["particle_id"]: d for d in diagnostics or []}
-
-            for i, row in df_sorted.iterrows():
-                cx, cy = int(row["X"]), int(row["Y"])
-                x1, x2 = max(0, cx - half), min(w, cx + half)
-                y1, y2 = max(0, cy - half), min(h, cy + half)
-                crop = reference_frame[y1:y2, x1:x2].copy()
-
-                # --- Overlay geodesic centerline (in bright green) ---
-                diag = diag_lookup.get(int(row["particle_id"]))
-                if diag:
-                    min_row, min_col, max_row, max_col = diag["bbox"]
-                    ridge = diag["ridge_mask"]
-                    overlap_y1 = max(y1, min_row)
-                    overlap_y2 = min(y2, max_row)
-                    overlap_x1 = max(x1, min_col)
-                    overlap_x2 = min(x2, max_col)
-                    if overlap_y1 < overlap_y2 and overlap_x1 < overlap_x2:
-                        ridge_sub = ridge[overlap_y1 - min_row:overlap_y2 - min_row,
-                                          overlap_x1 - min_col:overlap_x2 - min_col]
-                        crop_sub = crop[overlap_y1 - y1:overlap_y2 - y1,
-                                        overlap_x1 - x1:overlap_x2 - x1]
-                        crop_sub[ridge_sub] = (0, 255, 0)
-
-                crop = cv2.resize(crop, (crop_size, crop_size))
-                cv2.putText(crop, f"{metric}={row[metric]:.2f}",
-                            (5, crop_size - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5, (255, 255, 255), 1, cv2.LINE_AA)
-                crops.append(crop)
-
-            if not crops:
-                print("[collage_centerline] No valid crops created.")
-                return
-
-            # Combine all crops into grid
-            rows = []
-            for i in range(n_rows):
-                row_imgs = crops[i * n_cols:(i + 1) * n_cols]
-                if len(row_imgs) < n_cols:
-                    pad_img = np.zeros_like(row_imgs[0])
-                    row_imgs += [pad_img] * (n_cols - len(row_imgs))
-                rows.append(np.hstack(row_imgs))
-            collage = np.vstack(rows)
-
-            # Save output
-            frame_suffix = f"_frame{resolved_ref_frame_no}"
-            collage_path = os.path.join(output_dir, f"particle_collage_centerline_by_{metric}{frame_suffix}.jpg")
-            cv2.imwrite(collage_path, collage)
-            print(f"[collage_centerline] Saved: {collage_path}")
-
-        except Exception as e:
-            import traceback
-            print(f"[collage_centerline] Error while creating collage:\n{traceback.format_exc()}")
-
-
-
-    # Run collage creation if configured
     if save_outputs:
-        create_diagnostic_collage_centerline(df, metric="centerline_mean_width",
-                                            crop_size=250, n_cols=6,
-                                            diagnostics=particle_diagnostics)
+        if defer_collage:
+            df.attrs["collage_context"] = collage_context
+        else:
+            render_male_centerline_collage(
+                df,
+                run_folder_path=run_folder_path,
+                resolved_ref_frame_no=resolved_ref_frame_no,
+                output_dir=output_dir,
+                metric=collage_metric,
+                crop_size=250,
+                n_cols=6,
+                particle_diagnostics=particle_diagnostics,
+            )
 
     return df
 
@@ -1086,6 +1182,7 @@ def run_male_analysis_pipeline(
         run_folder_path,
         collage_metric=collage_metric,
         ref_frame_no=ref_frame_no,
+        defer_collage=True,
     )
 
     merged_df, assignments_df = match_long_exposure_traces_to_reference_particles(
@@ -1118,6 +1215,16 @@ def run_male_analysis_pipeline(
         body_lengths = centerline_length / feret.replace(0, np.nan)
     merged_df["body_lengths_traveled"] = body_lengths
 
+    body_lengths_map = None
+    if "particle_id" in merged_df.columns:
+        body_lengths_map = merged_df.set_index("particle_id")["body_lengths_traveled"]
+    if body_lengths_map is not None and "particle_id" in maledetect_df.columns:
+        collage_context = maledetect_df.attrs.get("collage_context")
+        maledetect_df = maledetect_df.copy()
+        if collage_context is not None:
+            maledetect_df.attrs["collage_context"] = collage_context
+        maledetect_df["body_lengths_traveled"] = maledetect_df["particle_id"].map(body_lengths_map)
+
     if save_outputs is None:
         try:
             with open("wellcounter_config.yml", "r") as f:
@@ -1140,5 +1247,18 @@ def run_male_analysis_pipeline(
         assignments_df.to_csv(assignments_path, index=False)
         print(f"[run_male_analysis_pipeline] Saved: {merged_path}")
         print(f"[run_male_analysis_pipeline] Saved: {assignments_path}")
+
+        collage_context = maledetect_df.attrs.get("collage_context")
+        if collage_context:
+            render_male_centerline_collage(
+                merged_df,
+                run_folder_path=collage_context.get("run_folder_path", run_folder_path),
+                resolved_ref_frame_no=collage_context.get("resolved_ref_frame_no", ref_frame_no or 0),
+                output_dir=collage_context.get("output_dir", output_dir),
+                metric=collage_context.get("metric", collage_metric),
+                crop_size=collage_context.get("crop_size", 250),
+                n_cols=collage_context.get("n_cols", 6),
+                particle_diagnostics=collage_context.get("particle_diagnostics"),
+            )
 
     return positions_df, long_exposure_image, maledetect_df, merged_df, assignments_df
