@@ -370,6 +370,11 @@ def compare_detected_particles(df_ref, df_query, measurement_cols=None):
     if df_query is None:
         df_query = pd.DataFrame()
 
+    # Keep track of the columns that originally belonged to ``df_query`` so we
+    # can avoid overwriting reference-only measurements (such as
+    # ``body_lengths_traveled``) with placeholder NaNs introduced below.
+    original_query_columns = set(df_query.columns)
+
     # --- ensure all required columns exist
     for col in expected_cols:
         if col not in df_ref.columns:
@@ -408,7 +413,13 @@ def compare_detected_particles(df_ref, df_query, measurement_cols=None):
         row_dict = df_ref.iloc[i].to_dict() # start with reference row
         if dist <= search_radius and idx not in matched_query_indices:
             matched_query_indices.add(idx)
-            row_dict.update(df_query.iloc[idx].to_dict()) # overwrite with query values
+            query_row = df_query.iloc[idx]
+            update_payload = {
+                col: query_row[col]
+                for col in query_row.index
+                if col in original_query_columns or col in essential_cols
+            }
+            row_dict.update(update_payload) # overwrite with query values when they exist
             # For matched particles, all measurement columns (X, Y, area, perimeter, etc.) come from df_query
             row_dict.update({'in_ref': 1, 'in_query': 1})
         else:
