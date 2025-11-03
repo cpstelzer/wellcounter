@@ -32,6 +32,7 @@ import glob
 from skimage.morphology import skeletonize
 from skimage.measure import label, regionprops
 from math import pi
+from typing import Optional
 
 # print(f"[DEBUG] Executing imaging module from: {__file__}", flush=True)
 
@@ -53,6 +54,11 @@ def get_image_file_list(run_folder_path):
         image_files.extend(glob.glob(os.path.join(run_folder_path, fmt)))
     image_files.sort()
     return image_files
+
+def resolve_image_directory(run_folder_path):
+    """Return the directory that actually stores the image sequence."""
+    jpg_dir = os.path.join(run_folder_path, "jpg")
+    return jpg_dir if os.path.isdir(jpg_dir) else run_folder_path
 
 def get_fps_from_sequence(run_folder_path):
     """
@@ -84,6 +90,54 @@ def get_frame_from_sequence(image_file_list, frame_number):
         return None
     frame = cv2.imread(frame_path, cv2.IMREAD_GRAYSCALE)
     return frame
+
+def determine_reference_frames(run_folder_path):
+    """Determine dataset type and reference frames for a run folder."""
+    image_dir = resolve_image_directory(run_folder_path)
+    image_file_list = get_image_file_list(image_dir)
+    total_frames = len(image_file_list)
+    dataset_type = "sampled" if total_frames <= 5 else "full_series"
+
+    frame_numbers = [
+        int(m.group(1)) if (m := re.search(r'_f(\d+)_', os.path.basename(f))) else np.nan
+        for f in image_file_list
+    ]
+
+    reference_indices = []
+    if total_frames == 0:
+        reference_frame_numbers = []
+    elif total_frames < 3:
+        reference_indices = list(range(total_frames))
+        reference_frame_numbers = [
+            frame_numbers[idx] if idx < len(frame_numbers) and not pd.isna(frame_numbers[idx]) else idx
+            for idx in reference_indices
+        ]
+    else:
+        if dataset_type == "full_series":
+            fps = get_fps_from_sequence(image_dir)
+            frame1_idx = 1
+            frame2_idx = total_frames // 2
+            frame3_idx = total_frames - int(2 * fps) - 2
+            frame1_idx = min(max(0, int(frame1_idx)), total_frames - 1)
+            frame2_idx = min(max(0, int(frame2_idx)), total_frames - 1)
+            frame3_idx = min(max(0, int(frame3_idx)), total_frames - 1)
+            reference_indices = [frame1_idx, frame2_idx, frame3_idx]
+            if len(set(reference_indices)) < 3:
+                reference_indices = [0, total_frames // 2, total_frames - 1]
+        else:
+            if any(pd.isna(num) for num in frame_numbers):
+                sorted_indices = list(range(total_frames))
+            else:
+                sorted_indices = list(np.argsort(frame_numbers))
+            reference_indices = sorted_indices[:3]
+
+        reference_indices = [int(idx) for idx in reference_indices[:3]]
+        reference_frame_numbers = [
+            frame_numbers[idx] if idx < len(frame_numbers) and not pd.isna(frame_numbers[idx]) else idx
+            for idx in reference_indices
+        ]
+
+    return dataset_type, reference_indices, reference_frame_numbers, image_file_list, frame_numbers
 
 def calculate_measurements(contour):
     M = cv2.moments(contour)
@@ -430,7 +484,13 @@ def image_analysis_of_sample(run_folder_path, image_file_list, ref_idx, sub_idx,
     table_of_particles['particle_type'] = 0
     return table_of_particles, binary_image, masked_image
 
-def count_particles(run_folder_path):
+def count_particles(
+    run_folder_path,
+    *,
+    reference_indices=None,
+    reference_frame_numbers=None,
+    dataset_type=None,
+):
     """
     Top-level controller. This version implements the "temporal sampling" method
     from the master script. It performs three independent analyses using frames
@@ -439,45 +499,123 @@ def count_particles(run_folder_path):
     The robust engineering of the 'experimental' script (image sequence input,
     error handling) is retained.
     """
-    image_file_list = get_image_file_list(run_folder_path)
+    image_dir = resolve_image_directory(run_folder_path)
+    image_file_list = get_image_file_list(image_dir)
     total_frames = len(image_file_list)
+    frame_numbers = [
+        int(m.group(1)) if (m := re.search(r'_f(\d+)_', os.path.basename(f))) else np.nan
+        for f in image_file_list
+    ]
+
+    auto_dataset_type = "sampled" if total_frames <= 5 else "full_series"
+    dataset_type_resolved = dataset_type or auto_dataset_type
+    if dataset_type_resolved not in {"sampled", "full_series"}:
+        dataset_type_resolved = auto_dataset_type
+
+    auto_indices = []
+    auto_frame_numbers = []
+    helper_data = None
+
+    if dataset_type is not None and dataset_type_resolved != auto_dataset_type:
+        print(
+            f"[count_particles] Detected dataset type: {auto_dataset_type}"
+            f" ({total_frames} images)"
+        )
+        print(
+            f"[count_particles] Using provided dataset type override: {dataset_type_resolved}"
+        )
+    else:
+        print(
+            f"[count_particles] Detected dataset type: {dataset_type_resolved}"
+            f" ({total_frames} images)"
+        )
+
     if total_frames < 3:
         print(f"Warning: Not enough frames in {run_folder_path} for full analysis.")
-        return pd.DataFrame({'avg_particles': [0], 'median_particle_size': [np.nan], 'spatial_nni': [np.nan]})
-    
-     # --- NEW: determine the well mask once for the sequence ---
-    first_frame = get_frame_from_sequence(image_file_list, 0)
-    _, global_mask = mask_well_area(first_frame)
-    
-    # Frame selection logic
-    if total_frames <= 5:
-        dataset_type = "sampled"
-    else:
-        dataset_type = "full_series"
-    print(f"[count_particles] Detected dataset type: {dataset_type} ({total_frames} images)")
+        summary_df = pd.DataFrame(
+            {
+                'avg_particles': [0],
+                'median_particle_size': [np.nan],
+                'spatial_nni': [np.nan],
+            }
+        )
+        empty_particles = pd.DataFrame(columns=['ref_frame', 'ref_frame_index'])
+        return summary_df, empty_particles
 
-    fps = get_fps_from_sequence(run_folder_path)
+    cleaned_indices = []
+    if reference_indices is not None:
+        for idx in reference_indices:
+            try:
+                idx_int = int(idx)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx_int < total_frames:
+                cleaned_indices.append(idx_int)
 
-    if dataset_type == "full_series":
-        frame1_idx = 1
-        frame2_idx = total_frames // 2
-        frame3_idx = total_frames - int(2 * fps) - 2
-        frame1_idx = min(max(0, int(frame1_idx)), total_frames - 1)
-        frame2_idx = min(max(0, int(frame2_idx)), total_frames - 1)
-        frame3_idx = min(max(0, int(frame3_idx)), total_frames - 1)
-        if len({frame1_idx, frame2_idx, frame3_idx}) < 3:
-            frame1_idx, frame2_idx, frame3_idx = 0, total_frames // 2, total_frames - 1
-            print(f"[count_particles] Anchor collision detected, falling back to frames {frame1_idx}, {frame2_idx}, {frame3_idx}")
+    if len(cleaned_indices) >= 3:
+        frame_indices = cleaned_indices[:3]
     else:
-        frame_numbers = [int(m.group(1)) if (m := re.search(r'_f(\d+)_', os.path.basename(f))) else np.nan for f in image_file_list]
-        if any(np.isnan(frame_numbers)):
-            print("[count_particles] Warning: could not parse frame numbers; using file order.")
-            sorted_indices = list(range(total_frames))
+        if reference_indices is not None and len(cleaned_indices) < 3:
+            print(
+                "[count_particles] Warning: Provided reference_indices are invalid or incomplete;"
+                " falling back to automatic selection."
+            )
+        helper_data = determine_reference_frames(run_folder_path)
+        auto_dataset_type_helper, auto_indices, auto_frame_numbers, _, helper_frame_numbers = helper_data
+        if dataset_type is None:
+            dataset_type_resolved = auto_dataset_type_helper
+        if not any(not pd.isna(val) for val in frame_numbers):
+            frame_numbers = helper_frame_numbers
+        frame_indices = auto_indices[:3]
+
+    if len(set(frame_indices)) < 3:
+        print("[count_particles] Anchor collision detected, using automatic reference frame set.")
+        if helper_data is None:
+            helper_data = determine_reference_frames(run_folder_path)
+            auto_dataset_type_helper, auto_indices, auto_frame_numbers, _, helper_frame_numbers = helper_data
+            if dataset_type is None:
+                dataset_type_resolved = auto_dataset_type_helper
+            if not any(not pd.isna(val) for val in frame_numbers):
+                frame_numbers = helper_frame_numbers
+        frame_indices = auto_indices[:3]
+
+    def normalize_frame_value(value, fallback):
+        if value is None:
+            return fallback
+        try:
+            if pd.isna(value):
+                return fallback
+        except TypeError:
+            pass
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    fallback_numbers = []
+    for idx in frame_indices:
+        if 0 <= idx < len(frame_numbers) and not pd.isna(frame_numbers[idx]):
+            fallback_numbers.append(int(frame_numbers[idx]))
         else:
-            sorted_indices = np.argsort(frame_numbers)
-        frame1_idx, frame2_idx, frame3_idx = sorted_indices[0], sorted_indices[1], sorted_indices[2]
+            fallback_numbers.append(int(idx))
 
-    print(f"[count_particles] Using frames (indices): {frame1_idx}, {frame2_idx}, {frame3_idx}")
+    provided_numbers = reference_frame_numbers or []
+    resolved_numbers = []
+    for pos, fallback in enumerate(fallback_numbers):
+        candidate = provided_numbers[pos] if pos < len(provided_numbers) else None
+        if candidate is None and pos < len(auto_frame_numbers):
+            candidate = auto_frame_numbers[pos]
+        resolved_numbers.append(normalize_frame_value(candidate, fallback))
+
+    print(
+        f"[count_particles] Using frames (indices): {frame_indices[0]}, {frame_indices[1]}, {frame_indices[2]}"
+    )
+
+    # --- determine the well mask once for the sequence ---
+    global_mask = None
+    first_frame = get_frame_from_sequence(image_file_list, 0)
+    if first_frame is not None:
+        _, global_mask = mask_well_area(first_frame)
 
     # --- Define output folder path (but don't create it yet) ---
     parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
@@ -490,9 +628,6 @@ def count_particles(run_folder_path):
     if save_outputs:
         os.makedirs(output_dir, exist_ok=True)
 
-
-    # Helper function for a single, self-contained analysis 
-        # Helper function for a single, self-contained analysis 
     def run_single_analysis(ref_idx, sub1_idx, sub2_idx, output_dir):
         """
         Mirrors the logic of the master script's image_analysis_of_sample.
@@ -534,30 +669,25 @@ def count_particles(run_folder_path):
 
         #print(f"[run_single_analysis] RefFrame {ref_idx}: Found {len(df_sub1)} (vs {sub1_idx}) and {len(df_sub2)} (vs {sub2_idx}) particles. Final count: {len(final_table)}")
         return final_table, bin1, bin2, masked_ref, binary_unsub if 'binary_unsub' in locals() else None
-        
-
-
     # Perform three INDEPENDENT analyses
     final_table1, binary1, binary2, masked1, binary_unsub1 = run_single_analysis(frame1_idx, frame2_idx, frame3_idx, output_dir)
     final_table2, _, _, _, _ = run_single_analysis(frame2_idx, frame1_idx, frame3_idx, output_dir)
     final_table3, _, _, _, _ = run_single_analysis(frame3_idx, frame1_idx, frame2_idx, output_dir)
 
-    # --- Add actual reference frame numbers instead of indices ---
-    # Extract frame numbers from filenames (e.g. "_f00087_")
-    frame_numbers = [
-        int(m.group(1)) if (m := re.search(r'_f(\d+)_', os.path.basename(f))) else np.nan
-        for f in image_file_list
-    ]
+    # Safely assign the true frame numbers and indices to each result table
+    frame_value_map = {
+        frame1_idx: resolved_numbers[0],
+        frame2_idx: resolved_numbers[1],
+        frame3_idx: resolved_numbers[2],
+    }
 
-    # Safely assign the true frame numbers to each result table
-    ref_frame1 = frame_numbers[frame1_idx] if frame1_idx < len(frame_numbers) else np.nan
-    ref_frame2 = frame_numbers[frame2_idx] if frame2_idx < len(frame_numbers) else np.nan
-    ref_frame3 = frame_numbers[frame3_idx] if frame3_idx < len(frame_numbers) else np.nan
+    final_table1['ref_frame'] = frame_value_map.get(frame1_idx, frame1_idx)
+    final_table2['ref_frame'] = frame_value_map.get(frame2_idx, frame2_idx)
+    final_table3['ref_frame'] = frame_value_map.get(frame3_idx, frame3_idx)
 
-    final_table1['ref_frame'] = ref_frame1
-    final_table2['ref_frame'] = ref_frame2
-    final_table3['ref_frame'] = ref_frame3
-
+    final_table1['ref_frame_index'] = frame1_idx
+    final_table2['ref_frame_index'] = frame2_idx
+    final_table3['ref_frame_index'] = frame3_idx
 
     # Optional post-detection shape filtering
     config = read_config()
@@ -597,7 +727,7 @@ def count_particles(run_folder_path):
     # Concatenate and compute metrics
     all_particles = pd.concat([final_table1, final_table2, final_table3], ignore_index=True)
     # Ensure 'ref_frame' is the first column
-    cols = ['ref_frame'] + [c for c in all_particles.columns if c != 'ref_frame']
+    cols = ['ref_frame', 'ref_frame_index'] + [c for c in all_particles.columns if c not in ('ref_frame', 'ref_frame_index')]
     all_particles = all_particles[cols]
 
     median_area = all_particles['area'].median() if not all_particles.empty else np.nan
@@ -654,4 +784,151 @@ def count_particles(run_folder_path):
 
     # Always return results programmatically
     return summary_df, all_particles
-    
+
+
+def count_complete(
+    run_folder_path,
+    *,
+    collage_metric: str = "centerline_mean_width",
+    save_male_outputs: Optional[bool] = None,
+):
+    """Run an integrated particle and male analysis with combined reporting."""
+
+    (
+        dataset_type,
+        reference_indices,
+        reference_frame_numbers,
+        _image_file_list,
+        _frame_numbers,
+    ) = determine_reference_frames(run_folder_path)
+
+    reference_indices = [int(idx) for idx in reference_indices]
+
+    summary_df, all_particles = count_particles(
+        run_folder_path,
+        reference_indices=reference_indices,
+        reference_frame_numbers=reference_frame_numbers,
+        dataset_type=dataset_type,
+    )
+
+    from wellcounter_male_module import count_males
+
+    simplified_combined, _ = count_males(
+        run_folder_path,
+        collage_metric=collage_metric,
+        save_outputs=save_male_outputs,
+        reference_indices=reference_indices,
+        reference_frame_numbers=reference_frame_numbers,
+    )
+
+    def normalize_frame_value(value, fallback):
+        if value is None:
+            return fallback
+        try:
+            if pd.isna(value):
+                return fallback
+        except TypeError:
+            pass
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    frame_stats = []
+    joined_tables = []
+
+    for idx, ref_idx in enumerate(reference_indices):
+        ref_value = reference_frame_numbers[idx] if idx < len(reference_frame_numbers) else None
+        ref_value = normalize_frame_value(ref_value, ref_idx)
+
+        if 'ref_frame_index' in simplified_combined.columns:
+            ref_mask = simplified_combined['ref_frame_index'] == ref_idx
+        else:
+            ref_mask = pd.Series([False] * len(simplified_combined), index=simplified_combined.index)
+        df_ref = simplified_combined[ref_mask].copy()
+
+        if 'ref_frame_index' in all_particles.columns:
+            query_mask = all_particles['ref_frame_index'] == ref_idx
+        else:
+            query_mask = pd.Series([False] * len(all_particles), index=all_particles.index)
+        df_query = all_particles[query_mask].copy()
+
+        joined_df = compare_detected_particles(df_ref, df_query).copy()
+        if joined_df.empty:
+            joined_df = joined_df.copy()
+
+        joined_df['ref_frame'] = ref_value
+        joined_df['ref_frame_index'] = ref_idx
+
+        male_series = joined_df['male'] if 'male' in joined_df.columns else pd.Series(False, index=joined_df.index)
+        male_series = male_series.fillna(False).astype(bool)
+        in_ref = joined_df['in_ref'].fillna(0).astype(int)
+        in_query = joined_df['in_query'].fillna(0).astype(int)
+
+        conditions = [
+            (in_ref == 1) & (in_query == 1) & (~male_series),
+            (in_ref == 1) & (in_query == 1) & (male_series),
+            (in_ref == 1) & (in_query == 0) & (male_series),
+            (in_ref == 1) & (in_query == 0) & (~male_series),
+            (in_ref == 0) & (in_query == 1),
+        ]
+        choices = ["female", "male", "male", "fpos", "impos"]
+        joined_df['particle_type'] = np.select(conditions, choices, default="unknown")
+
+        female_rows = joined_df[joined_df['particle_type'] == "female"]
+        nfems = int(len(female_rows))
+        nmales = int(len(joined_df[joined_df['particle_type'] == "male"]))
+        female_area = pd.to_numeric(female_rows.get('area'), errors='coerce') if 'area' in female_rows else pd.Series(dtype=float)
+        mean_area = float(female_area.mean()) if not female_area.empty else np.nan
+
+        frame_stats.append(
+            {
+                'ref_frame': ref_value,
+                'ref_frame_index': ref_idx,
+                'nfems': nfems,
+                'nmales': nmales,
+                'area': mean_area,
+                'joined_particles': joined_df,
+            }
+        )
+        joined_tables.append(joined_df)
+
+    if frame_stats:
+        frame_stats_df = pd.DataFrame(frame_stats)
+    else:
+        frame_stats_df = pd.DataFrame(
+            columns=['ref_frame', 'ref_frame_index', 'nfems', 'nmales', 'area', 'joined_particles']
+        )
+
+    nfems_values = [entry['nfems'] for entry in frame_stats]
+    nmales_values = [entry['nmales'] for entry in frame_stats]
+    area_values = [entry['area'] for entry in frame_stats]
+
+    mean_fems = float(np.nanmean(nfems_values)) if nfems_values else np.nan
+    mean_males = float(np.nanmean(nmales_values)) if nmales_values else np.nan
+    mean_area = float(np.nanmean(area_values)) if area_values else np.nan
+    sex_ratio = np.nan
+    if not np.isnan(mean_fems) and mean_fems != 0:
+        sex_ratio = mean_males / mean_fems
+
+    aggregated_data = {
+        'dataset_type': dataset_type,
+        'frame_count': len(reference_indices),
+        'mean_fems': mean_fems,
+        'mean_males': mean_males,
+        'sex_ratio': sex_ratio,
+        'mean_area': mean_area,
+    }
+
+    aggregated_df = pd.DataFrame([aggregated_data])
+    aggregated_df['reference_indices'] = [reference_indices]
+    aggregated_df['reference_frames'] = [reference_frame_numbers]
+
+    if isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
+        aggregated_df = pd.concat([aggregated_df.reset_index(drop=True), summary_df.reset_index(drop=True)], axis=1)
+
+    combined_joined_df = pd.concat(joined_tables, ignore_index=True) if joined_tables else pd.DataFrame()
+    frame_stats_df.attrs['combined_joined_particles'] = combined_joined_df
+
+    return aggregated_df, frame_stats_df
+
