@@ -1109,7 +1109,7 @@ def analyze_long_exposure_particles_advanced(
     return df
 
 
-def run_male_analysis_pipeline(
+def run_male_analysis(
     run_folder_path: str,
     ref_frame_no: int,
     rec_direction: str,
@@ -1245,4 +1245,4 @@ def run_male_analysis_pipeline(
                 particle_diagnostics=collage_context.get("particle_diagnostics"),
             )
 
-    return positions_df, long_exposure_image, maledetect_df, merged_df, assignments_df
+    return merged_df

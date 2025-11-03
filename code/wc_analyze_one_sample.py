@@ -45,15 +45,8 @@ else:
     # Generate long-exposure image and analyze particles
     ref_frame_no = 0
     rec_direction = 'forward'
-
-
-    (
-        positions_df,
-        long_exposure_image,
-        maledetect_df,
-        merged_df,
-        assignments_df,
-    ) = wma.run_male_analysis_pipeline(
+    
+    merged_df = wma.run_male_analysis(
         run_folder_path,
         ref_frame_no,
         rec_direction,
@@ -69,12 +62,9 @@ else:
     print("="*40)
     print("\nParticle Count Results:")
     print(count_df)
-    print(positions_df)
-    print(maledetect_df)
     print("\nMerged LEI/ref-frame metrics:")
     print(merged_df)
-    print("\nTrace-to-reference assignments (diagnostics):")
-    print(assignments_df)
+    
     #print("\nMotion Analysis Results:")
     #print(motion_df)
     
