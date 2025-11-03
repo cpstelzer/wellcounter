@@ -607,8 +607,16 @@ def count_particles(
             candidate = auto_frame_numbers[pos]
         resolved_numbers.append(normalize_frame_value(candidate, fallback))
 
+    if len(frame_indices) < 3:
+        raise ValueError(
+            "count_particles requires at least three reference frame indices, "
+            f"but received {len(frame_indices)}."
+        )
+
+    frame1_idx, frame2_idx, frame3_idx = frame_indices[:3]
+
     print(
-        f"[count_particles] Using frames (indices): {frame_indices[0]}, {frame_indices[1]}, {frame_indices[2]}"
+        f"[count_particles] Using frames (indices): {frame1_idx}, {frame2_idx}, {frame3_idx}"
     )
 
     # --- determine the well mask once for the sequence ---
