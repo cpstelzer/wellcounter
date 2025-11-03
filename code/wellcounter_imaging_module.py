@@ -942,5 +942,5 @@ def count_complete(
     combined_joined_df = pd.concat(joined_tables, ignore_index=True) if joined_tables else pd.DataFrame()
     frame_stats_df.attrs['combined_joined_particles'] = combined_joined_df
 
-    return aggregated_df, frame_stats_df
+    return aggregated_df, frame_stats_df, joined_df
 

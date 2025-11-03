@@ -43,7 +43,7 @@ else:
     count_df, particles_df = wim.count_particles(run_folder_path)
 
 
-    aggregated_df, frame_stats_df = wim.count_complete(run_folder_path)
+    aggregated_df, frame_stats_df, joined_df = wim.count_complete(run_folder_path)
 
     #males_df,_ = wma.count_males(run_folder_path)
     # Generate long-exposure image and analyze particles
@@ -72,6 +72,8 @@ else:
     print(aggregated_df)
     print("\nFrame-wise Count Statistics:")
     print(frame_stats_df)
+    print("\nJoined Particle Data:")
+    print(joined_df)
     #print("\nMale Count Results:")  
     #print(males_df)
 

@@ -18,7 +18,7 @@ optimize:
   training_path: C:/wellcounter/training_data_for_MEE
 outputs:
   motion: true
-  particle_detection: false
+  particle_detection: true
 particle_detection:
   background_is_dark: true
   default_particle_area: 500
