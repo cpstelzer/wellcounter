@@ -393,6 +393,10 @@ def compare_detected_particles(df_ref, df_query, measurement_cols=None):
     if 'X' not in df_ref.columns or 'Y' not in df_ref.columns or \
        'X' not in df_query.columns or 'Y' not in df_query.columns:
         return empty_df()
+    
+    # -- drop rows with missing coordinates
+    df_ref = df_ref.dropna(subset=['X','Y']).reset_index(drop=True)
+    df_query = df_query.dropna(subset=['X','Y']).reset_index(drop=True)
 
     # --- perform nearest-neighbor matching
     search_radius = params['search_radius_factor'] * np.sqrt(params['default_particle_area'] / np.pi)
