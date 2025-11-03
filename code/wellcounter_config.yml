@@ -1,12 +1,12 @@
+male_analysis:
+  duration: 0.5
+  min_area: 105
+  threshold: 12
 motion:
   analysis_duration: 3
   max_search_distance: 20
   min_trajectory_size: 5
   trajectory_random_colors: false
-male_analysis:
-  duration: 0.5
-  threshold: 12
-  min_area: 105
 optimize:
   area_from: 150
   area_step: 50
@@ -18,7 +18,7 @@ optimize:
   training_path: C:/wellcounter/training_data_for_MEE
 outputs:
   motion: true
-  particle_detection: true
+  particle_detection: false
 particle_detection:
   background_is_dark: true
   default_particle_area: 500

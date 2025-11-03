@@ -33,10 +33,10 @@ import wellcounter_motion_module as wmm
 from datetime import datetime
 
 # --- Configuration ---
-main_dir = "D:/wellcounter/popgrowth_20251001"
+main_dir = "D:/wellcounter/popgrowth_20251022"
 data_base_dir = os.path.join(main_dir, "image_sequences")
-treat_file = "popgrowth_20251001_treatments.csv"
-outfile = "popgrowth_20251001_results.csv"
+treat_file = "popgrowth_20251022_treatments.csv"
+outfile = "popgrowth_20251022_results.csv"
 
 # --- Main Analysis ---
 
@@ -82,7 +82,7 @@ for index, row in treat_df.iterrows():
 
             try:
                 # Perform image analysis
-                count_df = wim.count_particles(run_folder_path)
+                count_df,_ = wim.count_particles(run_folder_path)
                 # Optional: motion analysis can be re-enabled if desired
                 # motion_df = wmm.perform_motion_analysis(run_folder_path)
 
