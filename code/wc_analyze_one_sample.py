@@ -40,17 +40,18 @@ else:
     # FPS is determined automatically by the modules
     
     # Calculate avg. number of organisms
-    count_df,_ = wim.count_particles(run_folder_path)
+    count_df, particles_df = wim.count_particles(run_folder_path)
 
+    males_df,_ = wma.count_males(run_folder_path)
     # Generate long-exposure image and analyze particles
-    ref_frame_no = 0
-    rec_direction = 'forward'
+    #ref_frame_no = 0
+    #rec_direction = 'forward'
     
-    merged_df = wma.run_male_analysis(
-        run_folder_path,
-        ref_frame_no,
-        rec_direction,
-    )
+    #merged_df = wma.run_male_analysis(
+    #    run_folder_path,
+    #    ref_frame_no,
+    #    rec_direction,
+    #)
     
     # Perform motion analysis
     #motion_df = wmm.perform_motion_analysis(run_folder_path)
@@ -62,8 +63,13 @@ else:
     print("="*40)
     print("\nParticle Count Results:")
     print(count_df)
-    print("\nMerged LEI/ref-frame metrics:")
-    print(merged_df)
+    print("\nParticle Details:")
+    print(particles_df)
+    print("\nMale Count Results:")  
+    print(males_df)
+
+    #print("\nMerged LEI/ref-frame metrics:")
+    #print(merged_df)
     
     #print("\nMotion Analysis Results:")
     #print(motion_df)
