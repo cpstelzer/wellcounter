@@ -42,7 +42,10 @@ else:
     # Calculate avg. number of organisms
     count_df, particles_df = wim.count_particles(run_folder_path)
 
-    males_df,_ = wma.count_males(run_folder_path)
+
+    aggregated_df, frame_stats_df = wim.count_complete(run_folder_path)
+
+    #males_df,_ = wma.count_males(run_folder_path)
     # Generate long-exposure image and analyze particles
     #ref_frame_no = 0
     #rec_direction = 'forward'
@@ -65,8 +68,12 @@ else:
     print(count_df)
     print("\nParticle Details:")
     print(particles_df)
-    print("\nMale Count Results:")  
-    print(males_df)
+    print("\nAggregated Count Results:")
+    print(aggregated_df)
+    print("\nFrame-wise Count Statistics:")
+    print(frame_stats_df)
+    #print("\nMale Count Results:")  
+    #print(males_df)
 
     #print("\nMerged LEI/ref-frame metrics:")
     #print(merged_df)
