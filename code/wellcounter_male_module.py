@@ -1253,6 +1253,8 @@ def count_males(
     *,
     collage_metric: str = "centerline_mean_width",
     save_outputs: Optional[bool] = None,
+    reference_indices: Optional[list[int]] = None,
+    reference_frame_numbers: Optional[list[int]] = None,
 ):
     """High-level controller that samples three reference frames for male detection.
 
@@ -1372,31 +1374,92 @@ def count_males(
 
         return simplified_df, detailed_df
 
-    jpg_dir = os.path.join(run_folder_path, "jpg")
-    image_dir = jpg_dir if os.path.isdir(jpg_dir) else run_folder_path
-    image_file_list = wim.get_image_file_list(image_dir)
+    (
+        _auto_dataset_type,
+        auto_indices,
+        auto_frame_numbers,
+        image_file_list,
+        frame_numbers,
+    ) = wim.determine_reference_frames(run_folder_path)
 
     if not image_file_list:
-        print(f"[count_males] No image files found in {image_dir}.")
-        simplified_columns = ["ref_frame", "X", "Y", "male", "body_lengths_traveled"]
-        detailed_columns_full = ["ref_frame", "X", "Y", "male", "body_lengths_traveled", *detail_columns]
+        print(f"[count_males] No image files found in {run_folder_path}.")
+        simplified_columns = ["ref_frame", "ref_frame_index", "X", "Y", "male", "body_lengths_traveled"]
+        detailed_columns_full = [
+            "ref_frame",
+            "ref_frame_index",
+            "X",
+            "Y",
+            "male",
+            "body_lengths_traveled",
+            *detail_columns,
+        ]
         simplified_empty = pd.DataFrame(columns=simplified_columns)
         detailed_empty = pd.DataFrame(columns=detailed_columns_full)
         return simplified_empty, detailed_empty
 
     total_frames = len(image_file_list)
 
-    if total_frames <= 1:
-        reference_indices = [0]
-    elif total_frames == 2:
-        reference_indices = [0, 1]
+    cleaned_indices = []
+    if reference_indices is not None:
+        for idx in reference_indices:
+            try:
+                idx_int = int(idx)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx_int < total_frames:
+                cleaned_indices.append(idx_int)
+
+    expected_len = len(auto_indices) if auto_indices else len(cleaned_indices)
+    if expected_len == 0 and cleaned_indices:
+        expected_len = len(cleaned_indices)
+
+    if cleaned_indices:
+        selected_indices = cleaned_indices[:expected_len or len(cleaned_indices)]
+        if expected_len and len(selected_indices) < expected_len:
+            selected_indices.extend(auto_indices[len(selected_indices):expected_len])
     else:
-        reference_indices = [0, total_frames // 2, total_frames - 1]
+        selected_indices = auto_indices[:]
+
+    if not selected_indices:
+        selected_indices = [0] if total_frames else []
+
+    selected_indices = [int(idx) for idx in selected_indices if 0 <= int(idx) < total_frames]
+
+    auto_map = {idx: val for idx, val in zip(auto_indices, auto_frame_numbers)}
+
+    def normalize_frame_value(value, fallback):
+        if value is None:
+            return fallback
+        try:
+            if pd.isna(value):
+                return fallback
+        except TypeError:
+            pass
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    fallback_numbers = []
+    for idx in selected_indices:
+        fallback = auto_map.get(idx)
+        if fallback is None and 0 <= idx < len(frame_numbers) and not pd.isna(frame_numbers[idx]):
+            fallback = int(frame_numbers[idx])
+        if fallback is None:
+            fallback = int(idx)
+        fallback_numbers.append(int(fallback))
+
+    provided_numbers = reference_frame_numbers or []
+    resolved_numbers = []
+    for pos, fallback in enumerate(fallback_numbers):
+        candidate = provided_numbers[pos] if pos < len(provided_numbers) else None
+        resolved_numbers.append(normalize_frame_value(candidate, fallback))
 
     simplified_results = []
     detailed_results = []
-    for idx, ref_idx in enumerate(reference_indices):
-        direction = "reverse" if idx == len(reference_indices) - 1 else "forward"
+    for idx, ref_idx in enumerate(selected_indices):
+        direction = "reverse" if idx == len(selected_indices) - 1 else "forward"
 
         analysis_result = run_male_analysis(
             run_folder_path,
@@ -1417,26 +1480,36 @@ def count_males(
 
         simplified_df, detailed_df = filter_male_particles(merged_df)
 
-        if simplified_df.empty:
-            ref_value = ref_idx
-        else:
-            ref_value = ref_idx
+        base_value = resolved_numbers[idx] if idx < len(resolved_numbers) else ref_idx
+        ref_value = normalize_frame_value(base_value, ref_idx)
+
+        if not simplified_df.empty:
             if "reference_frame_value" in merged_df.columns:
                 candidate = merged_df["reference_frame_value"].iloc[0]
                 if pd.notna(candidate):
-                    ref_value = candidate
+                    ref_value = normalize_frame_value(candidate, ref_value)
             elif "requested_ref_frame_no" in merged_df.columns:
                 candidate = merged_df["requested_ref_frame_no"].iloc[0]
                 if pd.notna(candidate):
-                    ref_value = candidate
+                    ref_value = normalize_frame_value(candidate, ref_value)
 
         simplified_df.insert(0, "ref_frame", ref_value)
+        simplified_df.insert(1, "ref_frame_index", int(ref_idx))
         detailed_df.insert(0, "ref_frame", ref_value)
+        detailed_df.insert(1, "ref_frame_index", int(ref_idx))
         simplified_results.append(simplified_df)
         detailed_results.append(detailed_df)
 
-    simplified_columns = ["ref_frame", "X", "Y", "male", "body_lengths_traveled"]
-    detailed_columns_full = ["ref_frame", "X", "Y", "male", "body_lengths_traveled", *detail_columns]
+    simplified_columns = ["ref_frame", "ref_frame_index", "X", "Y", "male", "body_lengths_traveled"]
+    detailed_columns_full = [
+        "ref_frame",
+        "ref_frame_index",
+        "X",
+        "Y",
+        "male",
+        "body_lengths_traveled",
+        *detail_columns,
+    ]
 
     if not simplified_results:
         simplified_empty = pd.DataFrame(columns=simplified_columns)
