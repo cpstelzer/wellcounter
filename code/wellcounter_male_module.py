@@ -1246,3 +1246,207 @@ def run_male_analysis(
             )
 
     return merged_df
+
+
+def count_males(
+    run_folder_path: str,
+    *,
+    collage_metric: str = "centerline_mean_width",
+    save_outputs: Optional[bool] = None,
+):
+    """High-level controller that samples three reference frames for male detection.
+
+    Parameters
+    ----------
+    run_folder_path : str
+        Path to the sample run folder containing the image sequence (expects a
+        ``jpg`` subdirectory, matching :func:`run_male_analysis`).
+    collage_metric : str, optional
+        Sorting metric forwarded to :func:`run_male_analysis` for optional
+        diagnostic collages.
+    save_outputs : bool, optional
+        Overrides the configuration-driven output toggle when provided. When
+        ``None`` (default) the behaviour follows the underlying configuration.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, pandas.DataFrame]
+        The first element (``simplified_df``) contains the condensed male
+        summary with columns ``ref_frame``, ``X``, ``Y``, ``male``, and
+        ``body_lengths_traveled``. The second element (``detailed_df``) mirrors
+        the simplified columns while also including the extended morphology
+        metrics copied from the underlying merged analysis output.
+    """
+
+    detail_columns = [
+        "area",
+        "solidity",
+        "circularity",
+        "ridge_length",
+        "centerline_length",
+        "centerline_chord_length",
+        "centerline_straightness",
+        "centerline_mean_curvature",
+        "centerline_mean_width",
+        "centerline_width_std",
+        "centerline_n_pixels",
+        "bbox_min_row",
+        "bbox_min_col",
+        "bbox_max_row",
+        "bbox_max_col",
+        "ref_area",
+        "ref_perimeter",
+        "ref_orientation",
+        "ref_aspect_ratio",
+        "ref_solidity",
+        "ref_eccentricity",
+        "ref_feret_diameter",
+        "ref_bounding_x",
+        "ref_bounding_y",
+        "ref_bounding_w",
+        "ref_bounding_h",
+    ]
+
+    def filter_male_particles(
+        merged_df: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Project the merged analysis output to simplified and detailed tables."""
+
+        empty_simplified = pd.DataFrame(
+            {
+                "X": pd.Series(dtype=float),
+                "Y": pd.Series(dtype=float),
+                "male": pd.Series(dtype=bool),
+                "body_lengths_traveled": pd.Series(dtype=float),
+            }
+        )
+
+        if merged_df is None or merged_df.empty:
+            empty_detailed = empty_simplified.copy()
+            for column in detail_columns:
+                empty_detailed[column] = pd.Series(dtype=float)
+            return empty_simplified, empty_detailed
+
+        work_df = merged_df.reset_index(drop=True).copy()
+
+        if "ref_X" in work_df.columns:
+            x_series = pd.to_numeric(work_df["ref_X"], errors="coerce")
+        else:
+            x_series = pd.Series(np.nan, index=work_df.index, dtype=float)
+
+        if "ref_Y" in work_df.columns:
+            y_series = pd.to_numeric(work_df["ref_Y"], errors="coerce")
+        else:
+            y_series = pd.Series(np.nan, index=work_df.index, dtype=float)
+
+        if "body_lengths_traveled" in work_df.columns:
+            body_lengths = pd.to_numeric(
+                work_df["body_lengths_traveled"], errors="coerce"
+            )
+        else:
+            body_lengths = pd.Series(np.nan, index=work_df.index, dtype=float)
+
+        male_flag = (body_lengths >= 3).fillna(False).astype(bool)
+
+        simplified_data = {
+            "X": x_series,
+            "Y": y_series,
+            "male": male_flag,
+            "body_lengths_traveled": body_lengths,
+        }
+
+        detailed_data = {
+            key: value.copy(deep=True) if hasattr(value, "copy") else value
+            for key, value in simplified_data.items()
+        }
+
+        for column in detail_columns:
+            if column in work_df.columns:
+                detailed_series = pd.to_numeric(work_df[column], errors="coerce")
+            else:
+                detailed_series = pd.Series(np.nan, index=work_df.index, dtype=float)
+            detailed_data[column] = detailed_series
+
+        simplified_df = pd.DataFrame(simplified_data)
+        detailed_df = pd.DataFrame(detailed_data)
+
+        return simplified_df, detailed_df
+
+    jpg_dir = os.path.join(run_folder_path, "jpg")
+    image_dir = jpg_dir if os.path.isdir(jpg_dir) else run_folder_path
+    image_file_list = wim.get_image_file_list(image_dir)
+
+    if not image_file_list:
+        print(f"[count_males] No image files found in {image_dir}.")
+        simplified_columns = ["ref_frame", "X", "Y", "male", "body_lengths_traveled"]
+        detailed_columns_full = ["ref_frame", "X", "Y", "male", "body_lengths_traveled", *detail_columns]
+        simplified_empty = pd.DataFrame(columns=simplified_columns)
+        detailed_empty = pd.DataFrame(columns=detailed_columns_full)
+        return simplified_empty, detailed_empty
+
+    total_frames = len(image_file_list)
+
+    if total_frames <= 1:
+        reference_indices = [0]
+    elif total_frames == 2:
+        reference_indices = [0, 1]
+    else:
+        reference_indices = [0, total_frames // 2, total_frames - 1]
+
+    simplified_results = []
+    detailed_results = []
+    for idx, ref_idx in enumerate(reference_indices):
+        direction = "reverse" if idx == len(reference_indices) - 1 else "forward"
+
+        analysis_result = run_male_analysis(
+            run_folder_path,
+            ref_idx,
+            direction,
+            collage_metric=collage_metric,
+            save_outputs=save_outputs,
+        )
+
+        merged_df = (
+            analysis_result[-1]
+            if isinstance(analysis_result, tuple) and analysis_result
+            else analysis_result
+        )
+
+        if not isinstance(merged_df, pd.DataFrame):
+            merged_df = pd.DataFrame()
+
+        simplified_df, detailed_df = filter_male_particles(merged_df)
+
+        if simplified_df.empty:
+            ref_value = ref_idx
+        else:
+            ref_value = ref_idx
+            if "reference_frame_value" in merged_df.columns:
+                candidate = merged_df["reference_frame_value"].iloc[0]
+                if pd.notna(candidate):
+                    ref_value = candidate
+            elif "requested_ref_frame_no" in merged_df.columns:
+                candidate = merged_df["requested_ref_frame_no"].iloc[0]
+                if pd.notna(candidate):
+                    ref_value = candidate
+
+        simplified_df.insert(0, "ref_frame", ref_value)
+        detailed_df.insert(0, "ref_frame", ref_value)
+        simplified_results.append(simplified_df)
+        detailed_results.append(detailed_df)
+
+    simplified_columns = ["ref_frame", "X", "Y", "male", "body_lengths_traveled"]
+    detailed_columns_full = ["ref_frame", "X", "Y", "male", "body_lengths_traveled", *detail_columns]
+
+    if not simplified_results:
+        simplified_empty = pd.DataFrame(columns=simplified_columns)
+        detailed_empty = pd.DataFrame(columns=detailed_columns_full)
+        return simplified_empty, detailed_empty
+
+    simplified_combined = pd.concat(simplified_results, ignore_index=True)
+    detailed_combined = pd.concat(detailed_results, ignore_index=True)
+
+    return (
+        simplified_combined[simplified_columns],
+        detailed_combined[detailed_columns_full],
+    )
