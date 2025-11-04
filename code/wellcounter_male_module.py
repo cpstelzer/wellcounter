@@ -1054,15 +1054,15 @@ def analyze_long_exposure_particles_advanced(
     df = pd.DataFrame(results)
     print(f"[analyze_long_exposure_particles_advanced] Analyzed {len(df)} traces.")
 
-    # Save results
-    if save_outputs:
-        frame_suffix = f"_frame{resolved_ref_frame_no}"
-        analyzed_path = os.path.join(output_dir, f"LEI_males_analyzed{frame_suffix}.jpg")
-        df_path = os.path.join(output_dir, f"LEI_males_metrics{frame_suffix}.csv")
-        #cv2.imwrite(analyzed_path, overlay)
-        df.to_csv(df_path, index=False)
-        print(f"[analyze_long_exposure_particles_advanced] Saved: {analyzed_path}")
-        print(f"[analyze_long_exposure_particles_advanced] Saved: {df_path}")
+    # --- For diagnostic purposes (do not delete) ---
+    #if save_outputs:
+    #    frame_suffix = f"_frame{resolved_ref_frame_no}"
+    #    analyzed_path = os.path.join(output_dir, f"LEI_males_analyzed{frame_suffix}.jpg")
+    #    df_path = os.path.join(output_dir, f"LEI_males_metrics{frame_suffix}.csv")
+    #    cv2.imwrite(analyzed_path, overlay)
+    #    df.to_csv(df_path, index=False)
+    #    print(f"[analyze_long_exposure_particles_advanced] Saved: {analyzed_path}")
+    #    print(f"[analyze_long_exposure_particles_advanced] Saved: {df_path}")
 
 
     # --- Diagnostic visualization: Geodesic centerline overlay ---
@@ -1226,11 +1226,11 @@ def run_male_analysis(
         os.makedirs(output_dir, exist_ok=True)
         frame_suffix = f"_frame{int(ref_frame_no)}"
         merged_path = os.path.join(output_dir, f"merged_df{frame_suffix}.csv")
-        assignments_path = os.path.join(output_dir, f"assignments_df{frame_suffix}.csv")
+        # assignments_path = os.path.join(output_dir, f"assignments_df{frame_suffix}.csv")
         merged_df.to_csv(merged_path, index=False)
-        assignments_df.to_csv(assignments_path, index=False)
+        # assignments_df.to_csv(assignments_path, index=False)
         print(f"[run_male_analysis_pipeline] Saved: {merged_path}")
-        print(f"[run_male_analysis_pipeline] Saved: {assignments_path}")
+        # print(f"[run_male_analysis_pipeline] Saved: {assignments_path}")
 
         collage_context = maledetect_df.attrs.get("collage_context")
         if collage_context:

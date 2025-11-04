@@ -82,7 +82,8 @@ for index, row in treat_df.iterrows():
 
             try:
                 # Perform image analysis
-                count_df,_ = wim.count_particles(run_folder_path)
+                #count_df,_ = wim.count_particles(run_folder_path)
+                count_df, _, _ = wim.count_complete(run_folder_path)
                 # Optional: motion analysis can be re-enabled if desired
                 # motion_df = wmm.perform_motion_analysis(run_folder_path)
 

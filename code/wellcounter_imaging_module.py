@@ -292,7 +292,7 @@ def label_particles_by_type(image, joined_df):
         'male': (255, 255, 0),      # Cyan
         'fpos': (0, 0, 255),        # Red
         'impos': (0, 165, 255),     # Orange
-        'unknown': (200, 200, 200), # Light gray for unspecified types
+        'unknown': (0, 255, 255),   # Yellow for unspecified types
     }
 
     legend_entries = []
@@ -323,11 +323,11 @@ def label_particles_by_type(image, joined_df):
         reference_text = "Sample"
         base_size, _ = cv2.getTextSize(reference_text, font, 1, 2)
         base_height = max(base_size[1], 1)
-        desired_text_height = max(int(round(0.08 * height)), 1)
+        desired_text_height = max(int(round(0.015 * height)), 1)
         font_scale = desired_text_height / base_height
         font_thickness = max(int(round(font_scale * 2)), 1)
 
-        swatch_size = max(int(round(0.08 * min(height, width))), 4)
+        swatch_size = max(int(round(0.015 * min(height, width))), 4)
         legend_padding = max(int(round(swatch_size * 0.6)), 4)
         line_height = max(int(round(swatch_size * 1.4)), swatch_size + 2)
 
@@ -850,7 +850,7 @@ def count_particles(
         if save_outputs:
             first_frame = get_frame_from_sequence(image_file_list, frame1_idx)
             if first_frame is not None and not unfiltered1.empty:
-                output_path = os.path.join(output_dir, 'frame1_particles_filtered.jpg')
+                output_path = os.path.join(output_dir, 'shape_filtered_particles_frame1.jpg')
                 visualize_shape_filtering(first_frame.copy(),
                                         df_before=unfiltered1,
                                         df_after=final_table1,
@@ -890,32 +890,33 @@ def count_particles(
         # Save particle-level outputs (as before)
         first_frame = get_frame_from_sequence(image_file_list, frame1_idx)
         if first_frame is not None:
-            cv2.imwrite(os.path.join(output_dir, 'frame1_particles.jpg'),
-                        label_particles(first_frame.copy(), final_table1))
+            # cv2.imwrite(os.path.join(output_dir, 'frame1_particles.jpg'),
+            #            label_particles(first_frame.copy(), final_table1))
             if masked1 is not None:
                 cv2.imwrite(os.path.join(output_dir, 'frame1_masked_well.jpg'), masked1)
 
-        if binary1 is not None:
-            cv2.imwrite(os.path.join(output_dir, 'image_subtraction1.jpg'),
-                        label_particles(binary1, final_table1))
-        if binary2 is not None:
-            cv2.imwrite(os.path.join(output_dir, 'image_subtraction2.jpg'),
-                        label_particles(binary2, final_table1))
+
+        # --- For diagnostic purposes (do not delete) ---
+        #if binary1 is not None:
+        #    cv2.imwrite(os.path.join(output_dir, 'image_subtraction1.jpg'),
+        #                label_particles(binary1, final_table1))
+        #if binary2 is not None:
+        #    cv2.imwrite(os.path.join(output_dir, 'image_subtraction2.jpg'),
+        #                label_particles(binary2, final_table1))
+
             
-        # --- Save unsubtracted binary image of first frame (with filtered particles) ---
-        if save_outputs and binary_unsub1 is not None:
-            unsub_path = os.path.join(output_dir, 'frame1_binary_unsub.jpg')
+        # --- For diagnostic purposes (do not delete) ---
+        #if save_outputs and binary_unsub1 is not None:
+        #    unsub_path = os.path.join(output_dir, 'frame1_binary_unsub.jpg')
 
             # Overlay final (filtered) particle positions on the binary image
-            if final_table1 is not None and not final_table1.empty:
-                labeled_unsub = label_particles(binary_unsub1.copy(), final_table1)
-                cv2.imwrite(unsub_path, labeled_unsub)
-                print(f"[count_particles] Saved unsubtracted binary image with {len(final_table1)} filtered particles: {unsub_path}")
-            else:
-                cv2.imwrite(unsub_path, binary_unsub1)
-                print(f"[count_particles] Saved unsubtracted binary image (no particles detected): {unsub_path}")
-
-
+        #    if final_table1 is not None and not final_table1.empty:
+        #        labeled_unsub = label_particles(binary_unsub1.copy(), final_table1)
+        #        cv2.imwrite(unsub_path, labeled_unsub)
+        #        print(f"[count_particles] Saved unsubtracted binary image with {len(final_table1)} filtered particles: {unsub_path}")
+        #    else:
+        #        cv2.imwrite(unsub_path, binary_unsub1)
+        #        print(f"[count_particles] Saved unsubtracted binary image (no particles detected): {unsub_path}")
 
         all_particles.to_csv(os.path.join(output_dir, 'table_of_particles.csv'), index=False)
         
@@ -1051,16 +1052,18 @@ def count_complete(
     mean_fems = float(np.nanmean(nfems_values)) if nfems_values else np.nan
     mean_males = float(np.nanmean(nmales_values)) if nmales_values else np.nan
     mean_area = float(np.nanmean(area_values)) if area_values else np.nan
-    sex_ratio = np.nan
+    
     if not np.isnan(mean_fems) and mean_fems != 0:
-        sex_ratio = mean_males / mean_fems
+        pct_males = mean_males / (mean_fems + mean_males) * 100
+    else:    
+        pct_males = np.nan
 
     aggregated_data = {
         'dataset_type': dataset_type,
         'frame_count': len(reference_indices),
         'mean_fems': mean_fems,
         'mean_males': mean_males,
-        'sex_ratio': sex_ratio,
+        'male_pct': pct_males,
         'mean_area': mean_area,
     }
 
@@ -1122,10 +1125,10 @@ def count_complete(
 
             output_path = os.path.join(
                 analysis_dir,
-                f"frame{frame_number}_particle_types.jpg",
+                f"particle_types_frame{frame_number}.jpg",
             )
             cv2.imwrite(output_path, labeled_image)
             print(f"[count_complete] Saved particle type overlay: {output_path}")
 
-    return aggregated_df, frame_stats_df, joined_df
+    return aggregated_df, frame_stats_df, combined_joined_df
 
