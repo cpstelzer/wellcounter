@@ -288,11 +288,11 @@ def label_particles_by_type(image, joined_df):
     )
 
     color_map = {
-        'female': (0, 200, 0),      # Green-ish
-        'male': (0, 0, 255),        # Red
-        'fpos': (0, 165, 255),      # Orange
-        'impos': (128, 0, 255),     # Purple
-        'unknown': (255, 255, 255), # White
+        'female': (0, 255, 0),      # Green
+        'male': (255, 0, 0),        # Blue
+        'fpos': (0, 0, 255),        # Red
+        'impos': (0, 165, 255),     # Orange
+        'unknown': (200, 200, 200), # Light gray for unspecified types
     }
 
     legend_entries = []
@@ -317,12 +317,12 @@ def label_particles_by_type(image, joined_df):
 
     # Draw legend with the particle types encountered in the image.
     if legend_entries:
-        legend_padding = 10
-        swatch_size = 20
-        line_height = 25
+        legend_padding = 12
+        swatch_size = 24
+        line_height = 36
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        font_thickness = 1
+        font_scale = 0.8
+        font_thickness = 2
 
         # Legend background dimensions
         legend_width = 0
