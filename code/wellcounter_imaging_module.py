@@ -250,6 +250,65 @@ def label_particles(image, table_of_particles):
             cv2.circle(image, (x, y), search_radius, (0, 252, 124), thickness=3)
     return image
 
+
+def label_particles_by_type(image, joined_df):
+    """
+    Overlay detected particles on an image with colors based on their particle type.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Grayscale or color image that will be annotated.
+    joined_df : pandas.DataFrame
+        The joined particle table returned by ``count_complete``. Must contain
+        ``X`` and ``Y`` coordinates as well as a ``particle_type`` column.
+
+    Returns
+    -------
+    np.ndarray
+        Annotated image with colored circles indicating particle classifications.
+    """
+
+    if image is None:
+        return None
+
+    if joined_df is None or joined_df.empty:
+        if len(image.shape) == 2:
+            return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        return image
+
+    config = read_config()
+    params = config['particle_detection']
+
+    if len(image.shape) == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+    search_radius = round(
+        params['search_radius_factor'] * np.sqrt(params['default_particle_area'] / np.pi)
+    )
+
+    color_map = {
+        'female': (0, 200, 0),      # Green-ish
+        'male': (0, 0, 255),        # Red
+        'fpos': (0, 165, 255),      # Orange
+        'impos': (128, 0, 255),     # Purple
+        'unknown': (255, 255, 255), # White
+    }
+
+    for _, row in joined_df.iterrows():
+        try:
+            x, y = int(row['X']), int(row['Y'])
+        except (KeyError, ValueError, TypeError):
+            continue
+
+        particle_type = row.get('particle_type', 'unknown')
+        if isinstance(particle_type, float) and np.isnan(particle_type):
+            particle_type = 'unknown'
+        color = color_map.get(str(particle_type).lower(), color_map['unknown'])
+        cv2.circle(image, (x, y), search_radius, color, thickness=3)
+
+    return image
+
 def visualize_shape_filtering(image, df_before, df_after, output_path=None):
     """
     Visualize which particles were excluded by the shape filter.
@@ -952,6 +1011,59 @@ def count_complete(
 
     combined_joined_df = pd.concat(joined_tables, ignore_index=True) if joined_tables else pd.DataFrame()
     frame_stats_df.attrs['combined_joined_particles'] = combined_joined_df
+
+    config = read_config()
+    if bool(config['outputs'].get('particle_detection', False)):
+        image_dir = resolve_image_directory(run_folder_path)
+        image_file_list = get_image_file_list(image_dir)
+
+        parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
+        folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
+        analysis_dir = os.path.join(parent_dir, f"{folder_name}_image_analysis")
+        os.makedirs(analysis_dir, exist_ok=True)
+
+        for joined_table in joined_tables:
+            if joined_table is None or joined_table.empty:
+                continue
+
+            ref_idx_series = joined_table.get('ref_frame_index')
+            if ref_idx_series is None or ref_idx_series.dropna().empty:
+                continue
+
+            try:
+                ref_idx = int(ref_idx_series.dropna().iloc[0])
+            except (ValueError, TypeError):
+                continue
+
+            if not (0 <= ref_idx < len(image_file_list)):
+                continue
+
+            ref_frame_series = joined_table.get('ref_frame')
+            if isinstance(ref_frame_series, pd.Series):
+                ref_frame_series = ref_frame_series.dropna()
+                ref_frame_clean = ref_frame_series.iloc[0] if not ref_frame_series.empty else ref_idx
+            else:
+                ref_frame_clean = ref_idx
+
+            try:
+                frame_number = int(ref_frame_clean)
+            except (ValueError, TypeError):
+                frame_number = ref_idx
+
+            frame_image = get_frame_from_sequence(image_file_list, ref_idx)
+            if frame_image is None:
+                continue
+
+            labeled_image = label_particles_by_type(frame_image.copy(), joined_table)
+            if labeled_image is None:
+                continue
+
+            output_path = os.path.join(
+                analysis_dir,
+                f"frame{frame_number}_particle_types.jpg",
+            )
+            cv2.imwrite(output_path, labeled_image)
+            print(f"[count_complete] Saved particle type overlay: {output_path}")
 
     return aggregated_df, frame_stats_df, joined_df
 
