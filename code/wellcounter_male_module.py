@@ -760,7 +760,16 @@ def render_male_centerline_collage(
             print("[collage_centerline] No particles remain after sorting; skipping collage.")
             return
 
-        n_rows = int(np.ceil(n_particles / n_cols)) if n_particles else 0
+        max_particles = 24
+        if n_particles > max_particles:
+            print(
+                f"[collage_centerline] Limiting collage to the first {max_particles} particles "
+                f"out of {n_particles} available."
+            )
+        df_limited = df_sorted.head(max_particles)
+        n_display = len(df_limited)
+
+        n_rows = int(np.ceil(n_display / n_cols)) if n_display else 0
         half = crop_size // 2
         h, w = reference_frame.shape[:2]
         crops = []
@@ -769,7 +778,7 @@ def render_male_centerline_collage(
         if particle_diagnostics:
             diag_lookup = {int(d.get("particle_id")): d for d in particle_diagnostics if "particle_id" in d}
 
-        for _, row in df_sorted.iterrows():
+        for _, row in df_limited.iterrows():
             if {
                 "X",
                 "Y",
