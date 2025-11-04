@@ -289,7 +289,7 @@ def label_particles_by_type(image, joined_df):
 
     color_map = {
         'female': (0, 255, 0),      # Green
-        'male': (255, 0, 0),        # Blue
+        'male': (255, 255, 0),      # Cyan
         'fpos': (0, 0, 255),        # Red
         'impos': (0, 165, 255),     # Orange
         'unknown': (200, 200, 200), # Light gray for unspecified types
@@ -317,12 +317,19 @@ def label_particles_by_type(image, joined_df):
 
     # Draw legend with the particle types encountered in the image.
     if legend_entries:
-        legend_padding = 12
-        swatch_size = 24
-        line_height = 36
+        height, width = image.shape[:2]
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.8
-        font_thickness = 2
+
+        reference_text = "Sample"
+        base_size, _ = cv2.getTextSize(reference_text, font, 1, 2)
+        base_height = max(base_size[1], 1)
+        desired_text_height = max(int(round(0.08 * height)), 1)
+        font_scale = desired_text_height / base_height
+        font_thickness = max(int(round(font_scale * 2)), 1)
+
+        swatch_size = max(int(round(0.08 * min(height, width))), 4)
+        legend_padding = max(int(round(swatch_size * 0.6)), 4)
+        line_height = max(int(round(swatch_size * 1.4)), swatch_size + 2)
 
         # Legend background dimensions
         legend_width = 0
@@ -355,7 +362,11 @@ def label_particles_by_type(image, joined_df):
             top_left = (origin_x, y_offset)
             bottom_right = (origin_x + swatch_size, y_offset + swatch_size)
             cv2.rectangle(image, top_left, bottom_right, color, thickness=cv2.FILLED)
-            text_pos = (bottom_right[0] + legend_padding, y_offset + swatch_size - 5)
+            text_baseline_offset = int(round(desired_text_height * 0.2))
+            text_pos = (
+                bottom_right[0] + legend_padding,
+                y_offset + swatch_size - text_baseline_offset,
+            )
             cv2.putText(image, entry.capitalize(), text_pos, font, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
 
     return image
