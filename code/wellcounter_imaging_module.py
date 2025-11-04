@@ -295,6 +295,8 @@ def label_particles_by_type(image, joined_df):
         'unknown': (255, 255, 255), # White
     }
 
+    legend_entries = []
+
     for _, row in joined_df.iterrows():
         try:
             x, y = int(row['X']), int(row['Y'])
@@ -304,8 +306,57 @@ def label_particles_by_type(image, joined_df):
         particle_type = row.get('particle_type', 'unknown')
         if isinstance(particle_type, float) and np.isnan(particle_type):
             particle_type = 'unknown'
-        color = color_map.get(str(particle_type).lower(), color_map['unknown'])
+        particle_type = str(particle_type).lower()
+        if particle_type not in color_map:
+            particle_type = 'unknown'
+
+        color = color_map.get(particle_type, color_map['unknown'])
+        if particle_type not in legend_entries:
+            legend_entries.append(particle_type)
         cv2.circle(image, (x, y), search_radius, color, thickness=3)
+
+    # Draw legend with the particle types encountered in the image.
+    if legend_entries:
+        legend_padding = 10
+        swatch_size = 20
+        line_height = 25
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        font_thickness = 1
+
+        # Legend background dimensions
+        legend_width = 0
+        for entry in legend_entries:
+            text = entry.capitalize()
+            (text_width, _), _ = cv2.getTextSize(text, font, font_scale, font_thickness)
+            legend_width = max(legend_width, swatch_size + legend_padding + text_width)
+        legend_height = line_height * len(legend_entries)
+
+        # Place legend in top-left corner.
+        origin_x, origin_y = legend_padding, legend_padding
+        background_top_left = (origin_x - legend_padding, origin_y - legend_padding)
+        background_bottom_right = (
+            origin_x + legend_width + legend_padding,
+            origin_y + legend_height + legend_padding,
+        )
+        overlay = image.copy()
+        cv2.rectangle(
+            overlay,
+            background_top_left,
+            background_bottom_right,
+            (0, 0, 0),
+            thickness=cv2.FILLED,
+        )
+        cv2.addWeighted(overlay, 0.4, image, 0.6, 0, image)
+
+        for idx, entry in enumerate(legend_entries):
+            y_offset = origin_y + idx * line_height
+            color = color_map.get(entry, color_map['unknown'])
+            top_left = (origin_x, y_offset)
+            bottom_right = (origin_x + swatch_size, y_offset + swatch_size)
+            cv2.rectangle(image, top_left, bottom_right, color, thickness=cv2.FILLED)
+            text_pos = (bottom_right[0] + legend_padding, y_offset + swatch_size - 5)
+            cv2.putText(image, entry.capitalize(), text_pos, font, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
 
     return image
 
@@ -1019,7 +1070,7 @@ def count_complete(
 
         parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
         folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
-        analysis_dir = os.path.join(parent_dir, f"{folder_name}_image_analysis")
+        analysis_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
         os.makedirs(analysis_dir, exist_ok=True)
 
         for joined_table in joined_tables:
