@@ -552,7 +552,21 @@ def compare_detected_particles(df_ref, df_query, measurement_cols=None):
     unmatched_query = df_query.drop(index=list(matched_query_indices)).copy()
     unmatched_query['in_ref'], unmatched_query['in_query'] = 0, 1
 
-    merged = pd.concat([pd.DataFrame(matches), unmatched_query], ignore_index=True)
+    matches_df = pd.DataFrame(matches)
+
+    # ``pd.concat`` will begin casting mixed bool/numeric columns to ``object`` in
+    # a future pandas release.  Some particle feature columns are boolean when the
+    # row originates from ``df_query`` but numeric (0/1) for rows we assemble in
+    # ``matches`` above.  To keep the current behaviour and silence the upcoming
+    # warning we normalise the dtypes explicitly before concatenation.
+    for frame in (matches_df, unmatched_query):
+        if frame.empty:
+            continue
+        bool_columns = frame.select_dtypes(include="bool").columns
+        if len(bool_columns) > 0:
+            frame[bool_columns] = frame[bool_columns].astype(np.uint8)
+
+    merged = pd.concat([matches_df, unmatched_query], ignore_index=True)
 
     # --- ensure expected columns exist and correct order
     for col in expected_cols:
