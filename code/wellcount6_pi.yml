@@ -1,4 +1,4 @@
-name: wellcount6_pi
+name: wellcount6
 channels:
   - conda-forge
   - defaults
@@ -13,9 +13,9 @@ dependencies:
   - gstreamer
   - gst-plugins-base
   - gst-plugins-good
-  - scipy
-  - scikit-learn
   - gst-plugins-ugly
   - gst-plugins-bad
+  - scipy
+  - scikit-learn
+  - scikit-image
   - pyyaml
-prefix: C:\Users\.conda\envs\wellcount6_pi
