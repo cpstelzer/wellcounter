@@ -22,8 +22,8 @@ shift
 python_args=("$@")
 
 project_root="$SCRATCH/wellcounter"
-code_dir="$project_root/code"
 experiment_dir="$project_root/$experiment_name"
+code_dir=$experiment_dir
 
 if [ ! -d "$experiment_dir" ]; then
     echo "Experiment directory not found: $experiment_dir" >&2
