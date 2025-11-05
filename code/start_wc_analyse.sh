@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -euo pipefail
+set -euo pipefail 2>/dev/null || set -eu
 
 if [ $# -lt 1 ]; then
     echo "Usage: $(basename "$0") <experiment_name> [additional python args]" >&2
