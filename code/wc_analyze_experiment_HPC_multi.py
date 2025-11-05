@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import Iterable, Optional, Set, Tuple
+from typing import Iterable, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 
@@ -66,6 +66,7 @@ def analyze_experiment(
     output_filename: Optional[str] = None,
     include_motion: bool = False,
     resume: bool = False,
+    allowed_dates: Optional[Sequence[str]] = None,
 ) -> None:
     """Run the multi-date experiment analysis on the cluster."""
 
@@ -98,6 +99,17 @@ def analyze_experiment(
     treat_df = pd.read_csv(treat_path)
     processed_entries = load_processed_entries(outpath)
     known_dates = discover_dates(data_dir)
+
+    if allowed_dates is not None:
+        allowed_dates_set = {str(date) for date in allowed_dates}
+        missing_dates = sorted(set(allowed_dates_set) - set(known_dates))
+        if missing_dates:
+            print(
+                "Warning: Requested acquisition dates not present in data directory: "
+                + ", ".join(missing_dates)
+            )
+
+        known_dates = [date for date in known_dates if date in allowed_dates_set]
 
     if not known_dates:
         print("No acquisition dates detected — nothing to process.")
@@ -181,15 +193,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "experiment_name",
+        nargs="?",
         help=(
             "Name of the experiment folder below the base directory. "
-            "For example: 'popgrowth_20251022'."
+            "For example: 'popgrowth_20251022'.  Optional when --experiment-dir "
+            "is supplied."
         ),
     )
     parser.add_argument(
         "--base-dir",
         default=os.environ.get("SCRATCH", str(Path.cwd())),
         help="Base directory that contains the 'wellcounter' workspace.",
+    )
+    parser.add_argument(
+        "--experiment-dir",
+        default=None,
+        help=(
+            "Absolute path to the experiment directory. If omitted, the path is "
+            "constructed from --base-dir/wellcounter/<experiment_name>."
+        ),
     )
     parser.add_argument(
         "--image-subdir",
@@ -216,13 +238,31 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Append to an existing results file instead of recreating it.",
     )
+    parser.add_argument(
+        "--date",
+        dest="dates",
+        action="append",
+        default=None,
+        help=(
+            "Limit the analysis to the specified acquisition date (YYYYMMDD). "
+            "Can be passed multiple times to select multiple dates."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    base_dir = Path(args.base_dir).expanduser().resolve()
-    experiment_root = base_dir / "wellcounter" / args.experiment_name
+
+    if args.experiment_dir:
+        experiment_root = Path(args.experiment_dir).expanduser().resolve()
+    else:
+        base_dir = Path(args.base_dir).expanduser().resolve()
+        workspace_root = base_dir / "wellcounter"
+        if args.experiment_name:
+            experiment_root = workspace_root / args.experiment_name
+        else:
+            experiment_root = Path.cwd().resolve()
 
     analyze_experiment(
         experiment_root,
@@ -231,6 +271,7 @@ def main() -> None:
         output_filename=args.output_filename,
         include_motion=args.include_motion,
         resume=args.resume,
+        allowed_dates=args.dates,
     )
 
 
