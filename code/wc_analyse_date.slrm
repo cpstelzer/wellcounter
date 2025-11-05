@@ -5,7 +5,7 @@
 #SBATCH --time=48:00:00
 #SBATCH --job-name=wc_analyse
 
-set -euo pipefail
+set -euo pipefail 2>/dev/null || set -eu
 
 if [ $# -lt 1 ]; then
     echo "Usage: sbatch $(basename "$0") <experiment_name> [additional python args]" >&2
