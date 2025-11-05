@@ -24,9 +24,14 @@ import glob
 from skimage.morphology import skeletonize
 from skimage.measure import label, regionprops
 from math import pi
-import networkx as nx
 from skimage.morphology import thin
 from typing import Optional
+import heapq
+try:
+    from joblib import Parallel, delayed
+except ImportError:  # pragma: no cover - optional dependency in legacy environments
+    Parallel = None  # type: ignore[assignment]
+    delayed = None  # type: ignore[assignment]
 import wellcounter_motion_module as wmm
 import wellcounter_imaging_module as wim
 import copy
@@ -146,7 +151,7 @@ def generate_long_exposure_image_custom(
 
     return result_df, long_exposure_image
 
-def extract_major_ridge(mask, return_path: bool = False):
+def extract_major_ridge(mask, return_path: bool = False, return_dist: bool = False):
     """
     Extract a single, smooth centerline near the geometric middle of an irregular particle.
     Prefers high-distance (central) pixels instead of purely longest endpoints.
@@ -157,6 +162,8 @@ def extract_major_ridge(mask, return_path: bool = False):
         Binary particle mask (nonzero = foreground).
     return_path : bool, optional
         If True, also return the ordered list of (y, x) pixels along the geodesic centerline.
+    return_dist : bool, optional
+        If True, return the computed distance transform for reuse by the caller.
 
     Returns
     -------
@@ -164,10 +171,19 @@ def extract_major_ridge(mask, return_path: bool = False):
         Boolean array with True on centerline pixels.
     path_coords : list[tuple[int,int]]  (only if return_path=True)
         Ordered list of (y, x) coordinates from one endpoint to the other.
+    dist_transform : np.ndarray (float32)  (only if return_dist=True)
+        Euclidean distance transform of ``mask`` for reuse downstream.
     """
     mask = mask.astype(np.uint8)
+    empty_bool = np.zeros_like(mask, bool)
+    empty_dist = np.zeros_like(mask, dtype=np.float32)
     if mask.sum() == 0:
-        return (np.zeros_like(mask, bool), []) if return_path else np.zeros_like(mask, bool)
+        outputs = [empty_bool]
+        if return_path:
+            outputs.append([])
+        if return_dist:
+            outputs.append(empty_dist)
+        return outputs[0] if len(outputs) == 1 else tuple(outputs)
 
     # Distance transform (L2)
     dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
@@ -177,54 +193,126 @@ def extract_major_ridge(mask, return_path: bool = False):
     ridge = thin(ridge)
 
     ys, xs = np.nonzero(ridge)
-    if len(ys) < 2:
-        return (ridge, [(int(ys[0]), int(xs[0]))] if len(ys) == 1 else []) if return_path else ridge
+    node_count = len(ys)
+    if node_count == 0:
+        outputs = [ridge]
+        if return_path:
+            outputs.append([])
+        if return_dist:
+            outputs.append(dist)
+        return outputs[0] if len(outputs) == 1 else tuple(outputs)
 
-    # Weighted graph: cheaper in central (high-distance) areas
-    G = nx.Graph()
-    for y, x in zip(ys, xs):
+    coords = list(zip(ys.tolist(), xs.tolist()))
+    coord_to_index = {coord: idx for idx, coord in enumerate(coords)}
+
+    neighbors = [[] for _ in range(node_count)]
+    weights = [[] for _ in range(node_count)]
+
+    for idx, (y, x) in enumerate(coords):
         for dy in (-1, 0, 1):
             for dx in (-1, 0, 1):
                 if dy == 0 and dx == 0:
                     continue
                 yy, xx = y + dy, x + dx
                 if 0 <= yy < ridge.shape[0] and 0 <= xx < ridge.shape[1] and ridge[yy, xx]:
+                    neighbor_idx = coord_to_index.get((yy, xx))
+                    if neighbor_idx is None or neighbor_idx <= idx:
+                        continue
                     w = 1.0 / (1e-3 + 0.5 * (dist[y, x] + dist[yy, xx]))
-                    G.add_edge((y, x), (yy, xx), weight=w)
+                    neighbors[idx].append(neighbor_idx)
+                    weights[idx].append(w)
+                    neighbors[neighbor_idx].append(idx)
+                    weights[neighbor_idx].append(w)
 
-    # Endpoints that maximize weighted path length (graph diameter)
-    best_path = []
+    # Discover connected components using adjacency lists
+    visited = np.zeros(node_count, dtype=bool)
+    components = []
+    for node in range(node_count):
+        if visited[node]:
+            continue
+        stack = [node]
+        visited[node] = True
+        component = []
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbor_idx in neighbors[current]:
+                if not visited[neighbor_idx]:
+                    visited[neighbor_idx] = True
+                    stack.append(neighbor_idx)
+        components.append(component)
+
+    def _dijkstra(start_idx: int):
+        dist_arr = np.full(node_count, np.inf, dtype=np.float64)
+        parent = np.full(node_count, -1, dtype=np.int32)
+        dist_arr[start_idx] = 0.0
+        heap = [(0.0, start_idx)]
+        while heap:
+            current_dist, current_idx = heapq.heappop(heap)
+            if current_dist > dist_arr[current_idx]:
+                continue
+            for nb, w in zip(neighbors[current_idx], weights[current_idx]):
+                nd = current_dist + w
+                if nd < dist_arr[nb]:
+                    dist_arr[nb] = nd
+                    parent[nb] = current_idx
+                    heapq.heappush(heap, (nd, nb))
+        return dist_arr, parent
+
+    best_path_indices = []
     best_length = -1.0
-    for component in nx.connected_components(G):
+    for component in components:
         if not component:
             continue
-        seed = next(iter(component))
-        # First pass: farthest node from arbitrary seed
-        first_lengths = nx.single_source_dijkstra_path_length(G, seed, weight="weight")
-        if not first_lengths:
+        seed = component[0]
+        first_dists, _ = _dijkstra(seed)
+        component_dists = first_dists[component]
+        if not np.isfinite(component_dists).any():
             continue
-        farthest_seed = max(first_lengths, key=first_lengths.get)
-        # Second pass: farthest node from the previously found endpoint
-        second_lengths = nx.single_source_dijkstra_path_length(G, farthest_seed, weight="weight")
-        if not second_lengths:
+        farthest_seed = int(component[np.argmax(component_dists)])
+        second_dists, parents = _dijkstra(farthest_seed)
+        component_second = second_dists[component]
+        if not np.isfinite(component_second).any():
             continue
-        farthest_node = max(second_lengths, key=second_lengths.get)
-        length = second_lengths[farthest_node]
+        farthest_node = int(component[np.argmax(component_second)])
+        length = float(second_dists[farthest_node])
+        if length < 0:
+            continue
         if length > best_length:
             best_length = length
-            best_path = nx.dijkstra_path(G, farthest_seed, farthest_node, weight="weight")
+            path_indices = []
+            current = farthest_node
+            while current != -1:
+                path_indices.append(current)
+                if current == farthest_seed:
+                    break
+                current = parents[current]
+            if not path_indices or path_indices[-1] != farthest_seed:
+                # component disconnected due to missing edges; skip
+                continue
+            path_indices.reverse()
+            best_path_indices = path_indices
 
-    if not best_path:
-        return (ridge, []) if return_path else ridge
+    if not best_path_indices:
+        outputs = [ridge]
+        if return_path:
+            outputs.append([])
+        if return_dist:
+            outputs.append(dist)
+        return outputs[0] if len(outputs) == 1 else tuple(outputs)
 
-    path = best_path
+    path = [(int(coords[idx][0]), int(coords[idx][1])) for idx in best_path_indices]
 
-    # Rasterize
     clean = np.zeros_like(ridge, bool)
     for (y, x) in path:
         clean[y, x] = True
 
-    return (clean, path) if return_path else clean
+    outputs = [clean]
+    if return_path:
+        outputs.append(path)
+    if return_dist:
+        outputs.append(dist)
+    return outputs[0] if len(outputs) == 1 else tuple(outputs)
 
 def _polyline_metrics_from_path(path_xy, dist_transform=None):
     """
@@ -297,6 +385,42 @@ def _polyline_metrics_from_path(path_xy, dist_transform=None):
 
     return out
 
+
+def _compute_centerline_for_region(idx, mask_uint8, min_row, min_col, max_row, max_col):
+    """Worker helper to extract ridge and metrics for a single particle mask."""
+    ridge_mask, ridge_path, dist_transform = extract_major_ridge(
+        mask_uint8, return_path=True, return_dist=True
+    )
+    ridge_mask = ridge_mask.astype(bool, copy=False)
+    ridge_length = int(np.count_nonzero(ridge_mask))
+
+    if ridge_path:
+        start_local = ridge_path[0]
+        end_local = ridge_path[-1]
+        start_global = (
+            int(start_local[1] + min_col),
+            int(start_local[0] + min_row),
+        )
+        end_global = (
+            int(end_local[1] + min_col),
+            int(end_local[0] + min_row),
+        )
+    else:
+        start_global = None
+        end_global = None
+
+    centerline_metrics = _polyline_metrics_from_path(ridge_path, dist_transform=dist_transform)
+
+    return {
+        "idx": idx,
+        "ridge_mask": ridge_mask,
+        "ridge_path_local": [(int(y), int(x)) for (y, x) in ridge_path],
+        "ridge_length": ridge_length,
+        "centerline_metrics": centerline_metrics,
+        "start_global": start_global,
+        "end_global": end_global,
+        "bbox": (int(min_row), int(min_col), int(max_row), int(max_col)),
+    }
 
 
 def _path_local_to_global_xy(path_local, min_row, min_col):
@@ -970,6 +1094,8 @@ def analyze_long_exposure_particles_advanced(
 
     results = []  # store metrics
     particle_diagnostics = []
+    region_infos = []
+    centerline_inputs = []
 
     for idx, region in enumerate(props, start=1):
         if region.area < 10:
@@ -977,36 +1103,56 @@ def analyze_long_exposure_particles_advanced(
 
         min_row, min_col, max_row, max_col = region.bbox
         mask = (labeled[min_row:max_row, min_col:max_col] == region.label)
-        mask_uint8 = mask.astype(np.uint8)
+        mask_uint8 = mask.astype(np.uint8, copy=False)
         area = int(region.area)
 
-        # --- Geodesic centerline extraction ---
-        ridge_mask, ridge_path = extract_major_ridge(mask_uint8, return_path=True)
-        ridge_mask = ridge_mask.astype(bool, copy=False)
-        ridge_length = int(np.count_nonzero(ridge_mask))
-        ridge_path_local = [(int(y), int(x)) for (y, x) in ridge_path]
-        if ridge_path_local:
-            start_local = ridge_path_local[0]
-            end_local = ridge_path_local[-1]
-            start_global = (
-                int(start_local[1] + min_col),
-                int(start_local[0] + min_row),
-            )
-            end_global = (
-                int(end_local[1] + min_col),
-                int(end_local[0] + min_row),
+        region_infos.append({
+            "idx": idx,
+            "region": region,
+            "area": area,
+            "min_row": int(min_row),
+            "min_col": int(min_col),
+            "max_row": int(max_row),
+            "max_col": int(max_col),
+        })
+        centerline_inputs.append((idx, mask_uint8, int(min_row), int(min_col), int(max_row), int(max_col)))
+
+    centerline_results = []
+    if centerline_inputs:
+        if Parallel is not None and len(centerline_inputs) > 1:
+            n_jobs = min(os.cpu_count() or 1, len(centerline_inputs))
+            centerline_results = Parallel(n_jobs=n_jobs, prefer="processes")(  # type: ignore[misc]
+                delayed(_compute_centerline_for_region)(idx, mask, min_row, min_col, max_row, max_col)
+                for idx, mask, min_row, min_col, max_row, max_col in centerline_inputs
             )
         else:
-            start_global = None
-            end_global = None
+            centerline_results = [
+                _compute_centerline_for_region(idx, mask, min_row, min_col, max_row, max_col)
+                for idx, mask, min_row, min_col, max_row, max_col in centerline_inputs
+            ]
 
+    centerline_map = {res["idx"]: res for res in centerline_results}
 
-        dist_transform = cv2.distanceTransform(mask_uint8, cv2.DIST_L2, 5)
+    for info in region_infos:
+        idx = info["idx"]
+        region = info["region"]
+        centerline_data = centerline_map.get(idx)
+        if centerline_data is None:
+            continue
 
-        # --- Centerline metrics (parallel to skeleton metrics) ---
-        centerline_metrics = _polyline_metrics_from_path(ridge_path, dist_transform=dist_transform)
+        min_row = info["min_row"]
+        min_col = info["min_col"]
+        max_row = info["max_row"]
+        max_col = info["max_col"]
+        area = info["area"]
 
-        # Classical metrics
+        ridge_mask = centerline_data["ridge_mask"]
+        ridge_path_local = centerline_data["ridge_path_local"]
+        ridge_length = centerline_data["ridge_length"]
+        start_global = centerline_data["start_global"]
+        end_global = centerline_data["end_global"]
+        centerline_metrics = centerline_data["centerline_metrics"]
+
         contours, _ = cv2.findContours(region.convex_image.astype(np.uint8),
                                        cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
@@ -1019,7 +1165,6 @@ def analyze_long_exposure_particles_advanced(
 
         cx, cy = region.centroid[::-1]
 
-        # Assemble record
         results.append({
             "particle_id": idx,
             "X": cx,
@@ -1055,7 +1200,7 @@ def analyze_long_exposure_particles_advanced(
             overlay_slice[ridge_mask] = (0, 0, 255)
             particle_diagnostics.append({
                 "particle_id": idx,
-                "bbox": (min_row, min_col, max_row, max_col),
+                "bbox": centerline_data["bbox"],
                 "ridge_mask": ridge_mask,
             })
         
