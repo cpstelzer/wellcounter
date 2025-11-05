@@ -1,7 +1,5 @@
 #!/bin/bash
 
-# This script must be checked out with Unix (LF) line endings.
-# See .gitattributes if you encounter $'\r' errors when running it.
 set -euo pipefail 2>/dev/null || set -eu
 
 if [ $# -lt 1 ]; then
