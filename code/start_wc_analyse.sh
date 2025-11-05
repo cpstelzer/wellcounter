@@ -1,34 +1,20 @@
 #!/bin/bash
 
-set -euo pipefail 2>/dev/null || set -eu
+cd "$SCRATCH/wellcounter/popgrowth_20251001"
 
-if [ $# -lt 1 ]; then
-    echo "Usage: $(basename "$0") <experiment_name> [additional python args]" >&2
-    exit 1
-fi
+dates=(
+    20251002
+    20251003
+    20251004
+    20251005
+    20251006
+    20251007
+    20251008
+    20251009
+    20251010
+)
 
-if [ -z "${SCRATCH:-}" ]; then
-    echo "Environment variable SCRATCH is not defined." >&2
-    exit 1
-fi
-
-experiment_name="$1"
-shift
-
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-slurm_script="${script_dir}/wc_analyse_date.slrm"
-
-if [ ! -f "$slurm_script" ]; then
-    echo "Unable to locate SLURM script: $slurm_script" >&2
-    exit 1
-fi
-
-scratch_root="$SCRATCH/wellcounter"
-if [ ! -d "$scratch_root" ]; then
-    echo "Expected project directory not found: $scratch_root" >&2
-    exit 1
-fi
-
-echo "Submitting Wellcounter analysis for experiment '${experiment_name}'."
-sbatch "$slurm_script" "$experiment_name" "$@"
-
+for date in "${dates[@]}"
+do
+   sbatch "$SCRATCH/wellcounter/popgrowth_20250627/wc_analyse_date.slrm" "$date"
+done
