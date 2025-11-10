@@ -5,9 +5,12 @@ Analyze a finished wellcounter experiment
 Author: Stelzer Lab
 """
 
+import gc
 import os
 import sys
+
 import pandas as pd
+
 import wellcounter_imaging_module as wim
 import wellcounter_motion_module as wmm
 
@@ -28,12 +31,14 @@ def analyze_experiment(date):
     # Check if the output file already exists and load the processed data
     if os.path.exists(outpath):
         processed_df = pd.read_csv(outpath)
-        processed_entries = set(processed_df.apply(lambda row: (row['batch'], row['plate'], row['well']), axis=1))
+        processed_entries = set(
+            processed_df.apply(lambda row: (row['batch'], row['plate'], row['well']), axis=1)
+        )
+        del processed_df
     else:
         processed_entries = set()
 
-    # Initialize an empty DataFrame to collect the results
-    result_df = pd.DataFrame()
+    header_written = os.path.exists(outpath)
     
     # Treatments --- batch,plate,well,pop,clone,food,initial_count
     for index, row in treat.iterrows():
@@ -86,11 +91,15 @@ def analyze_experiment(date):
             #concatenated_df = pd.concat([treat_df, count_df, motion_df], axis=1)
             concatenated_df = pd.concat([treat_df, count_df], axis=1)
 
-            # Concatenate the concatenated DataFrame with the existing result DataFrame
-            result_df = pd.concat([result_df, concatenated_df], ignore_index=True)
-
             # Save the updated results to the output file after each iteration of the inner loop
-            concatenated_df.to_csv(outpath, mode='a', index=False, header=not os.path.exists(outpath))
+            concatenated_df.to_csv(outpath, mode='a', index=False, header=not header_written)
+            header_written = True
+
+            # Release large temporary DataFrames before processing the next sample
+            del count_df
+            del treat_df
+            del concatenated_df
+            gc.collect()
 
         except FileNotFoundError as fnf_error:
             print(fnf_error)
