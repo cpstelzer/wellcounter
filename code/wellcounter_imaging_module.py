@@ -945,11 +945,61 @@ def count_particles(
     return summary_df, all_particles
 
 
+def _save_particle_overlay(joined_table, analysis_dir, image_file_list):
+    """Persist a labeled overlay for debugging without retaining large tables in memory."""
+
+    if analysis_dir is None or not image_file_list:
+        return
+
+    if joined_table is None or joined_table.empty:
+        return
+
+    ref_idx_series = joined_table.get('ref_frame_index')
+    if ref_idx_series is None or ref_idx_series.dropna().empty:
+        return
+
+    try:
+        ref_idx = int(ref_idx_series.dropna().iloc[0])
+    except (ValueError, TypeError):
+        return
+
+    if not (0 <= ref_idx < len(image_file_list)):
+        return
+
+    ref_frame_series = joined_table.get('ref_frame')
+    if isinstance(ref_frame_series, pd.Series):
+        ref_frame_series = ref_frame_series.dropna()
+        ref_frame_clean = ref_frame_series.iloc[0] if not ref_frame_series.empty else ref_idx
+    else:
+        ref_frame_clean = ref_idx
+
+    try:
+        frame_number = int(ref_frame_clean)
+    except (ValueError, TypeError):
+        frame_number = ref_idx
+
+    frame_image = get_frame_from_sequence(image_file_list, ref_idx)
+    if frame_image is None:
+        return
+
+    labeled_image = label_particles_by_type(frame_image.copy(), joined_table)
+    if labeled_image is None:
+        return
+
+    output_path = os.path.join(
+        analysis_dir,
+        f"particle_types_frame{frame_number}.jpg",
+    )
+    cv2.imwrite(output_path, labeled_image)
+    print(f"[count_complete] Saved particle type overlay: {output_path}")
+
+
 def count_complete(
     run_folder_path,
     *,
     collage_metric: str = "centerline_mean_width",
     save_male_outputs: Optional[bool] = None,
+    include_debug_tables: bool = False,
 ):
     """Run an integrated particle and male analysis with combined reporting."""
 
@@ -962,6 +1012,24 @@ def count_complete(
     ) = determine_reference_frames(run_folder_path)
 
     reference_indices = [int(idx) for idx in reference_indices]
+
+    debug_env = os.getenv("WELLCOUNTER_DEBUG_TABLES")
+    if debug_env is not None:
+        include_debug_tables = debug_env.lower() in {"1", "true", "yes", "on"}
+
+    config = read_config()
+    outputs_enabled = bool(config.get('outputs', {}).get('particle_detection', False))
+
+    image_file_list = []
+    analysis_dir = None
+    if outputs_enabled:
+        image_dir = resolve_image_directory(run_folder_path)
+        image_file_list = get_image_file_list(image_dir)
+
+        parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
+        folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
+        analysis_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
+        os.makedirs(analysis_dir, exist_ok=True)
 
     summary_df, all_particles = count_particles(
         run_folder_path,
@@ -994,7 +1062,7 @@ def count_complete(
             return fallback
 
     frame_stats = []
-    joined_tables = []
+    joined_tables = [] if include_debug_tables else None
 
     for idx, ref_idx in enumerate(reference_indices):
         ref_value = reference_frame_numbers[idx] if idx < len(reference_frame_numbers) else None
@@ -1040,24 +1108,34 @@ def count_complete(
         female_area = pd.to_numeric(female_rows.get('area'), errors='coerce') if 'area' in female_rows else pd.Series(dtype=float)
         mean_area = float(female_area.mean()) if not female_area.empty else np.nan
 
-        frame_stats.append(
-            {
-                'ref_frame': ref_value,
-                'ref_frame_index': ref_idx,
-                'nfems': nfems,
-                'nmales': nmales,
-                'area': mean_area,
-                'joined_particles': joined_df,
-            }
-        )
-        joined_tables.append(joined_df)
+        frame_stat_entry = {
+            'ref_frame': ref_value,
+            'ref_frame_index': ref_idx,
+            'nfems': nfems,
+            'nmales': nmales,
+            'area': mean_area,
+        }
+
+        if include_debug_tables:
+            frame_stat_entry['joined_particles'] = joined_df.copy()
+            joined_tables.append(joined_df.copy())
+
+        if outputs_enabled:
+            _save_particle_overlay(joined_df, analysis_dir, image_file_list)
+
+        frame_stats.append(frame_stat_entry)
+
+        del joined_df
+        del df_ref
+        del df_query
 
     if frame_stats:
         frame_stats_df = pd.DataFrame(frame_stats)
     else:
-        frame_stats_df = pd.DataFrame(
-            columns=['ref_frame', 'ref_frame_index', 'nfems', 'nmales', 'area', 'joined_particles']
-        )
+        columns = ['ref_frame', 'ref_frame_index', 'nfems', 'nmales', 'area']
+        if include_debug_tables:
+            columns.append('joined_particles')
+        frame_stats_df = pd.DataFrame(columns=columns)
 
     nfems_values = [entry['nfems'] for entry in frame_stats]
     nmales_values = [entry['nmales'] for entry in frame_stats]
@@ -1088,61 +1166,16 @@ def count_complete(
     if isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
         aggregated_df = pd.concat([aggregated_df.reset_index(drop=True), summary_df.reset_index(drop=True)], axis=1)
 
-    combined_joined_df = pd.concat(joined_tables, ignore_index=True) if joined_tables else pd.DataFrame()
-    frame_stats_df.attrs['combined_joined_particles'] = combined_joined_df
+    del all_particles
 
-    config = read_config()
-    if bool(config['outputs'].get('particle_detection', False)):
-        image_dir = resolve_image_directory(run_folder_path)
-        image_file_list = get_image_file_list(image_dir)
+    if include_debug_tables and joined_tables:
+        combined_joined_df = pd.concat(joined_tables, ignore_index=True)
+        frame_stats_df.attrs['combined_joined_particles'] = combined_joined_df
+    else:
+        combined_joined_df = pd.DataFrame()
 
-        parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
-        folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
-        analysis_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
-        os.makedirs(analysis_dir, exist_ok=True)
-
-        for joined_table in joined_tables:
-            if joined_table is None or joined_table.empty:
-                continue
-
-            ref_idx_series = joined_table.get('ref_frame_index')
-            if ref_idx_series is None or ref_idx_series.dropna().empty:
-                continue
-
-            try:
-                ref_idx = int(ref_idx_series.dropna().iloc[0])
-            except (ValueError, TypeError):
-                continue
-
-            if not (0 <= ref_idx < len(image_file_list)):
-                continue
-
-            ref_frame_series = joined_table.get('ref_frame')
-            if isinstance(ref_frame_series, pd.Series):
-                ref_frame_series = ref_frame_series.dropna()
-                ref_frame_clean = ref_frame_series.iloc[0] if not ref_frame_series.empty else ref_idx
-            else:
-                ref_frame_clean = ref_idx
-
-            try:
-                frame_number = int(ref_frame_clean)
-            except (ValueError, TypeError):
-                frame_number = ref_idx
-
-            frame_image = get_frame_from_sequence(image_file_list, ref_idx)
-            if frame_image is None:
-                continue
-
-            labeled_image = label_particles_by_type(frame_image.copy(), joined_table)
-            if labeled_image is None:
-                continue
-
-            output_path = os.path.join(
-                analysis_dir,
-                f"particle_types_frame{frame_number}.jpg",
-            )
-            cv2.imwrite(output_path, labeled_image)
-            print(f"[count_complete] Saved particle type overlay: {output_path}")
+    if not include_debug_tables and 'joined_particles' in frame_stats_df.columns:
+        frame_stats_df = frame_stats_df.drop(columns=['joined_particles'])
 
     return aggregated_df, frame_stats_df, combined_joined_df
 
