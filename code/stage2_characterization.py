@@ -31,8 +31,10 @@ Run the module as a script once Stage 02 produced ``final_particles``::
 
 Relative paths for ``--final-particles`` and ``--reference-image`` are resolved
 from ``--stage2-root`` so that all inputs remain inside the
-``stage2_characterization`` folder.  The command writes the cropped median
-particle image and metadata CSV into ``stage2_characterization/final_median``.
+``stage2_characterization`` folder. When ``--stage2-root`` is omitted the script
+attempts to infer it from the current working directory or the provided
+``--final-particles`` path.  The command writes the cropped median particle
+image and metadata CSV into ``stage2_characterization/final_median``.
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ from __future__ import annotations
 import argparse
 import re
 from pathlib import Path
-from typing import Optional, Sequence, Tuple
+from typing import Iterable, Optional, Sequence, Tuple
 
 import cv2
 import pandas as pd
@@ -63,7 +65,9 @@ def stage2_save_median_particle(
     ----------
     stage2_root:
         Folder that contains Stage 02 outputs (``stage2_characterization`` by
-        default).
+        default). When omitted or when the default path does not exist, the
+        function attempts to infer the correct directory from the supplied
+        ``final_particles_path`` or the current working directory.
     final_particles_path:
         Optional path (absolute or relative to ``stage2_root``) that points to
         the CSV file with the ``final_particles`` table. When omitted, the
@@ -86,7 +90,7 @@ def stage2_save_median_particle(
         Paths to the cropped image and CSV metadata that were written.
     """
 
-    stage2_root = Path(stage2_root)
+    stage2_root = _normalize_stage2_root(stage2_root, final_particles_path)
     final_particles_file = _locate_final_particles_file(stage2_root, final_particles_path)
     particles_df = _load_particles(final_particles_file)
 
@@ -117,6 +121,47 @@ def stage2_save_median_particle(
         f"{image_output_path} and {csv_output_path}",
     )
     return image_output_path, csv_output_path
+
+
+def _normalize_stage2_root(stage2_root: str | Path, final_particles_path: Optional[str | Path]) -> Path:
+    """Resolve the Stage 02 root directory with a few useful fallbacks."""
+
+    candidate = Path(stage2_root)
+    if candidate.exists():
+        return candidate.resolve()
+
+    # Allow callers to pass a final_particles file outside the default root. If
+    # an explicit path is provided and exists, the root can be inferred from it.
+    cwd = Path.cwd().resolve()
+    if final_particles_path:
+        explicit = Path(final_particles_path)
+        if explicit.is_absolute() and explicit.exists():
+            return explicit.parent.resolve()
+        relative_candidate = (cwd / explicit).resolve()
+        if relative_candidate.exists():
+            return relative_candidate.parent
+
+    # When no explicit root exists, look for a nearby folder that resembles the
+    # Stage 02 layout (e.g., current directory or a child directory that matches
+    # the default name).
+    fallbacks: Iterable[Path] = (
+        cwd,
+        cwd / DEFAULT_STAGE2_ROOT,
+    )
+
+    for fallback in fallbacks:
+        if not fallback.exists():
+            continue
+        if list(fallback.glob("final_particles*.csv")):
+            return fallback
+        nested = fallback / "final_particles"
+        if nested.exists() and list(nested.glob("final_particles*.csv")):
+            return fallback
+
+    raise FileNotFoundError(
+        "Unable to resolve the Stage 02 root directory. Pass --stage2-root or "
+        "ensure that the default 'stage2_characterization' folder exists."
+    )
 
 
 def _locate_final_particles_file(stage2_root: Path, explicit_path: Optional[str | Path]) -> Path:
@@ -234,10 +279,9 @@ def _resolve_reference_image(
                 return candidate
 
     for search_root in (fallback_dir, stage2_root):
-        for extension in IMAGE_EXTENSIONS:
-            matches = sorted(search_root.glob(f"*{extension}"))
-            if matches:
-                return matches[0].resolve()
+        candidates = _search_for_images(search_root)
+        if candidates:
+            return candidates[0]
 
     raise FileNotFoundError(
         "Unable to locate a reference image for cropping the median particle."
@@ -281,6 +325,32 @@ def _sanitize_identifier(value: str) -> str:
     return cleaned or "median_particle"
 
 
+def _search_for_images(root: Path) -> Sequence[Path]:
+    """Return reference image candidates sorted by usefulness."""
+
+    if not root.exists():
+        return []
+
+    candidates = []
+    for extension in IMAGE_EXTENSIONS:
+        candidates.extend(root.rglob(f"*{extension}"))
+
+    prioritized = sorted(candidates, key=_image_priority)
+    return [path.resolve() for path in prioritized]
+
+
+def _image_priority(path: Path) -> Tuple[int, str]:
+    name = path.name.lower()
+    score = 0
+    if "frame1" in name:
+        score -= 3
+    if "particle" in name or "particles" in name:
+        score -= 2
+    if "frame" in name:
+        score -= 1
+    return score, str(path)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -291,7 +361,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stage2-root",
         default=str(DEFAULT_STAGE2_ROOT),
-        help="Directory that stores Stage 02 outputs (default: stage2_characterization).",
+        help=(
+            "Directory that stores Stage 02 outputs. If omitted, the script tries "
+            "to use ./stage2_characterization or the folder that contains the "
+            "provided final_particles file."
+        ),
     )
     parser.add_argument(
         "--final-particles",
