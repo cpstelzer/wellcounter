@@ -25,12 +25,14 @@ Example
 Run the module as a script once Stage 02 produced ``final_particles``::
 
     python code/stage2_characterization.py \
-        --stage2-root path/to/stage2_characterization \
+        --stage2-root /data/stage2_characterization \
         --final-particles final_particles/final_particles.csv \
-        --reference-image path/to/frame1_particles.jpg
+        --reference-image reference_images/frame1_particles.jpg
 
-The command writes the cropped median particle image and metadata CSV into
-``stage2_characterization/final_median``.
+Relative paths for ``--final-particles`` and ``--reference-image`` are resolved
+from ``--stage2-root`` so that all inputs remain inside the
+``stage2_characterization`` folder.  The command writes the cropped median
+particle image and metadata CSV into ``stage2_characterization/final_median``.
 """
 
 from __future__ import annotations
@@ -69,8 +71,10 @@ def stage2_save_median_particle(
         ``stage2_root``.
     reference_image_path:
         Path to the image that contains the bounding boxes referenced by
-        ``final_particles``. When omitted, the function attempts to infer the
-        image path from the particle table or by scanning the Stage 02 folder.
+        ``final_particles``.  Relative paths are interpreted with respect to
+        ``stage2_root`` to keep all inputs inside the Stage 02 directory. When
+        omitted, the function attempts to infer the image path from the
+        particle table or by scanning the Stage 02 folder.
     area_column:
         Name of the column that stores the ``main_area_filled`` measurement.
     padding:
@@ -302,7 +306,10 @@ def _parse_args() -> argparse.Namespace:
         "--reference-image",
         dest="reference_image",
         default=None,
-        help="Explicit path to the reference image that will be cropped.",
+        help=(
+            "Explicit path to the reference image that will be cropped. Relative "
+            "paths are interpreted from the Stage 02 root."
+        ),
     )
     parser.add_argument(
         "--area-column",
