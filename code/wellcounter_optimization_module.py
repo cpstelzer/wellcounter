@@ -30,15 +30,17 @@ Date: 2025-02-07
 
 """
 
-import pandas as pd
-import os
-import numpy as np
-import yaml
-import tempfile
-import shutil
-import wellcounter_imaging_module as wim
+import copy
 import logging
-from datetime import date   
+import os
+from datetime import date
+
+import numpy as np
+import pandas as pd
+import wellcounter_imaging_module as wim
+import yaml
+
+from wellcounter_config import load_config
 
 # Get the current date
 current_date = date.today().strftime("%Y%m%d")
@@ -51,42 +53,9 @@ def read_config(config_path="wellcounter_config.yml"):
     Function to read the config file.
     """
     try:
-        with open(config_path, "r") as config_file:
-            config = yaml.load(config_file, Loader=yaml.FullLoader)
-        return config
+        return load_config(config_path)
     except Exception as e:
         logging.error(f"Error reading config file: {e}")
-        raise
-
-def write_config(config, config_path="wellcounter_config.yml"):
-    """
-    Function to write the config file.
-    """
-    try:
-        with open(config_path, "w") as config_file:
-            yaml.dump(config, config_file)
-    except Exception as e:
-        logging.error(f"Error writing config file: {e}")
-        raise
-
-def backup_config(config_path="wellcounter_config.yml"):
-    try:
-        config = read_config(config_path)
-        # Open the temporary file in text mode
-        with tempfile.NamedTemporaryFile(mode='w+', delete=False) as temp_file:
-            yaml.dump(config, temp_file)
-        return temp_file.name
-    except Exception as e:
-        logging.error(f"Error backing up config: {e}")
-        raise
-
-
-def restore_config(backup_file, config_path="wellcounter_config.yml"):
-    try:
-        shutil.copy(backup_file, config_path)
-        os.remove(backup_file)
-    except Exception as e:
-        logging.error(f"Error restoring config: {e}")
         raise
         
    
@@ -144,7 +113,7 @@ def calculate_performance_metrics(df):
     return df_metrics
 
 
-def evaluate_imaging_parameters_OLD(training_path='E:/'):
+def evaluate_imaging_parameters_OLD(training_path='E:/', config=None):
     """
     Assess the effects of two imaging parameters (microorganism_threshold, min_microorganism_area) on 
     female detection performance metrics. Iterates through a curated training dataset.
@@ -171,6 +140,8 @@ def evaluate_imaging_parameters_OLD(training_path='E:/'):
     
     try:
                
+        config = config if config is not None else read_config()
+
         # Load training data
         random_sample = pd.read_csv(os.path.join(training_path, 'random_sample_of_combined_data.csv'))
         comparison_df = pd.DataFrame()
@@ -205,7 +176,7 @@ def evaluate_imaging_parameters_OLD(training_path='E:/'):
         print(performance_metrics)
         
         # Read the config file
-        config = read_config()
+        config = config if config is not None else read_config()
         print("Checkpoint_2:")
         print(config)
         
@@ -225,7 +196,7 @@ def evaluate_imaging_parameters_OLD(training_path='E:/'):
         logging.error(f"Error in evaluate_imaging_parameters: {e}")
         raise
 
-def evaluate_imaging_parameters(training_path='E:/'):
+def evaluate_imaging_parameters(training_path='E:/', config=None):
     """
     Assess the effects of two imaging parameters (microorganism_threshold, min_microorganism_area) on 
     female detection performance metrics. Iterates through a curated training dataset.
@@ -252,9 +223,11 @@ def evaluate_imaging_parameters(training_path='E:/'):
     
     try:
                
+        config = config if config is not None else read_config()
+
         # Get a list of all .mp4 video files in the directory
         video_files = [
-            f for f in os.listdir(training_path) 
+            f for f in os.listdir(training_path)
             if os.path.isfile(os.path.join(training_path, f)) and f.endswith('.mp4')
         ]
         
@@ -295,8 +268,6 @@ def evaluate_imaging_parameters(training_path='E:/'):
         
        
         # Read the config file
-        config = read_config()
-        
         particle_detection_params = config['particle_detection']
         
         performance_metrics['microorganism_threshold'] = particle_detection_params['microorganism_threshold']
@@ -325,25 +296,21 @@ def batch_optimizer(config_path="wellcounter_config.yml"):
     """
     
     # Function to append configuration to log
-    def append_config_to_log():
+    def append_config_to_log(config_to_log):
         # Log a separator and some whitespace for readability
         logging.info("\n" + '-'*40 + "\n")
-        
+
         # Convert the config dictionary to a YAML-formatted string
-        formatted_config = yaml.dump(config, default_flow_style=False, sort_keys=False)
-        
+        formatted_config = yaml.dump(config_to_log, default_flow_style=False, sort_keys=False)
+
         # Log the formatted configuration
         logging.info("Configuration Settings:\n" + formatted_config)
-        
-        
-    
-    temp_file_path = backup_config()
-    
-    # Read the config file
-    config = read_config(config_path)
-    
+
+    # Read the config file once
+    base_config = read_config(config_path)
+
     # Extract optimization parameters
-    optimize_config = config.get('optimize', {})
+    optimize_config = base_config.get('optimize', {})
     training_path = optimize_config.get('training_path', 'E:/')
     output_folder = optimize_config.get('output_folder', 'C:/')
     threshold_from = optimize_config.get('threshold_from', 4)
@@ -371,19 +338,20 @@ def batch_optimizer(config_path="wellcounter_config.yml"):
             for area in area_range:
                 try:
                     
-                    # Load and update the config
-                    config = read_config(config_path)
-                    config["particle_detection"]["microorganism_threshold"] = threshold
-                    config["particle_detection"]["min_microorganism_area"] = area
-                    config["outputs"]["particle_detection"] = False         # Suppress particle detection outputs during optimization
-                    write_config(config, config_path)
-                    
+                    # Load and update the config in memory
+                    config = copy.deepcopy(base_config)
+                    particle_detection_settings = config.setdefault("particle_detection", {})
+                    particle_detection_settings["microorganism_threshold"] = threshold
+                    particle_detection_settings["min_microorganism_area"] = area
+                    outputs_settings = config.setdefault("outputs", {})
+                    outputs_settings["particle_detection"] = False         # Suppress particle detection outputs during optimization
+
                     print("Current image analysis parameters are: ")
                     print("Pixel threshold: ", threshold)
                     print("Microorganism area: ", area)
-                    
+
                     # Evaluate parameters
-                    performance_metrics_query, _ = evaluate_imaging_parameters(training_path) 
+                    performance_metrics_query, _ = evaluate_imaging_parameters(training_path, config=config)
                     
                     # Determine whether to write headers: write if file does not exist or is empty
                     if not os.path.exists(outpath_csv_query) or os.path.getsize(outpath_csv_query) == 0:
@@ -403,11 +371,10 @@ def batch_optimizer(config_path="wellcounter_config.yml"):
                     logging.error(f"Error in optimizing parameters at threshold {threshold} and area {area}: {e}")
                     print(f"Error in optimizing parameters at threshold {threshold} and area {area}: {e}")
 
-    logging.info("Batch optimization completed and results saved.")    
-    restore_config(temp_file_path)
-    
+    logging.info("Batch optimization completed and results saved.")
+
     # Save wellcounter-configuration file to log
-    append_config_to_log()   
+    append_config_to_log(base_config)
     
 if __name__ == "__main__":
     batch_optimizer(config_path="wellcounter_config.yml")

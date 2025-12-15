@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 from sklearn.neighbors import BallTree
 import os
-import yaml
 import math
 import re
 from scipy.spatial import distance_matrix
@@ -35,6 +34,11 @@ except ImportError:  # pragma: no cover - optional dependency in legacy environm
 import wellcounter_motion_module as wmm
 import wellcounter_imaging_module as wim
 import copy
+from wellcounter_config import load_config
+
+
+def _ensure_config(config=None):
+    return config if config is not None else load_config()
 
 
 _LAST_LEI_METADATA = {}
@@ -43,7 +47,8 @@ _LAST_LEI_METADATA = {}
 def generate_long_exposure_image_custom(
     run_folder_path,
     ref_frame_no: int = 0,
-    rec_direction: str = 'forward'
+    rec_direction: str = 'forward',
+    config=None,
 ):
     """
     Generate a Long Exposure Image (LEI) using configuration-managed parameters.
@@ -71,47 +76,32 @@ def generate_long_exposure_image_custom(
         The generated long-exposure image.
     """
 
-    
+    base_config = _ensure_config(config)
+    runtime_config = copy.deepcopy(base_config)
 
-    # --- Locate and read config file ---
-    config_path = "wellcounter_config.yml"
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-    original_config = copy.deepcopy(config)
-
-    male_params = config.get('male_analysis', {})
+    male_params = runtime_config.get('male_analysis', {})
     analysis_duration = float(male_params.get('duration', 0.5))
     microorganism_threshold = int(male_params.get('threshold', 12))
     min_microorganism_area = int(male_params.get('min_area', 105))
 
-    # --- Apply temporary parameters ---
-    config['motion']['analysis_duration'] = analysis_duration
-    config['particle_detection']['microorganism_threshold'] = microorganism_threshold
-    config['particle_detection']['min_microorganism_area'] = min_microorganism_area
+    runtime_config['motion']['analysis_duration'] = analysis_duration
+    runtime_config['particle_detection']['microorganism_threshold'] = microorganism_threshold
+    runtime_config['particle_detection']['min_microorganism_area'] = min_microorganism_area
 
-    # --- Write modified config to disk ---
-    with open(config_path, "w") as f:
-        yaml.safe_dump(config, f)
-    print("[generate_long_exposure_image_custom] Temporary config written to disk:")
-    print(f"  motion.analysis_duration = {config['motion']['analysis_duration']}")
-    print(f"  particle_detection.microorganism_threshold = {config['particle_detection']['microorganism_threshold']}")
-    print(f"  particle_detection.min_microorganism_area = {config['particle_detection']['min_microorganism_area']}")
+    print("[generate_long_exposure_image_custom] Using in-memory config overrides:")
+    print(f"  motion.analysis_duration = {runtime_config['motion']['analysis_duration']}")
+    print(f"  particle_detection.microorganism_threshold = {runtime_config['particle_detection']['microorganism_threshold']}")
+    print(f"  particle_detection.min_microorganism_area = {runtime_config['particle_detection']['min_microorganism_area']}")
 
-    # --- Run the standard particle recording function ---
-    try:
-        result_df, long_exposure_image = wmm.record_particle_positions_from_sequence(
-            run_folder_path,
-            ref_frame_no=ref_frame_no,
-            rec_direction=rec_direction
-        )
-    finally:
-        # --- Always restore the original config ---
-        with open(config_path, "w") as f:
-            yaml.safe_dump(original_config, f)
-        print("[generate_long_exposure_image_custom] Original config restored.")
+    result_df, long_exposure_image = wmm.record_particle_positions_from_sequence(
+        run_folder_path,
+        ref_frame_no=ref_frame_no,
+        rec_direction=rec_direction,
+        config=runtime_config,
+    )
 
     # --- Save the long-exposure image if output enabled ---
-    output_params = original_config.get('outputs', {})
+    output_params = runtime_config.get('outputs', {})
     if long_exposure_image is None:
         print("[generate_long_exposure_image_custom] Failed to generate LEI.")
         return result_df, None
@@ -1011,6 +1001,7 @@ def analyze_long_exposure_particles_advanced(
     ref_frame_no: Optional[int] = None,
     *,
     defer_collage: bool = False,
+    config=None,
 ):
     """
     Advanced morphological analysis of binary long-exposure images (LEI),
@@ -1066,9 +1057,8 @@ def analyze_long_exposure_particles_advanced(
 
     # --- Load config ---
     try:
-        with open("wellcounter_config.yml", "r") as f:
-            config = yaml.safe_load(f)
-        save_outputs = bool(config.get("outputs", {}).get("particle_detection", False))
+        loaded_config = _ensure_config(config)
+        save_outputs = bool(loaded_config.get("outputs", {}).get("particle_detection", False))
     except Exception:
         save_outputs = False
 
@@ -1270,6 +1260,7 @@ def run_male_analysis(
     *,
     collage_metric: str = "centerline_mean_width",
     save_outputs: Optional[bool] = None,
+    config=None,
 ):
     """Execute the full male-trace analysis workflow for a single sample.
 
@@ -1309,6 +1300,7 @@ def run_male_analysis(
         run_folder_path,
         ref_frame_no,
         rec_direction,
+        config=config,
     )
 
     if long_exposure_image is None or positions_df is None:
@@ -1321,6 +1313,7 @@ def run_male_analysis(
         collage_metric=collage_metric,
         ref_frame_no=ref_frame_no,
         defer_collage=True,
+        config=config,
     )
 
     merged_df, assignments_df = match_long_exposure_traces_to_reference_particles(
@@ -1365,9 +1358,8 @@ def run_male_analysis(
 
     if save_outputs is None:
         try:
-            with open("wellcounter_config.yml", "r") as f:
-                config = yaml.safe_load(f)
-            save_outputs_flag = bool(config.get("outputs", {}).get("particle_detection", False))
+            resolved_config = _ensure_config(config)
+            save_outputs_flag = bool(resolved_config.get("outputs", {}).get("particle_detection", False))
         except Exception:
             save_outputs_flag = False
     else:
@@ -1409,6 +1401,7 @@ def count_males(
     save_outputs: Optional[bool] = None,
     reference_indices: Optional[list[int]] = None,
     reference_frame_numbers: Optional[list[int]] = None,
+    config=None,
 ):
     """High-level controller that samples three reference frames for male detection.
 
@@ -1621,6 +1614,7 @@ def count_males(
             direction,
             collage_metric=collage_metric,
             save_outputs=save_outputs,
+            config=config,
         )
 
         merged_df = (

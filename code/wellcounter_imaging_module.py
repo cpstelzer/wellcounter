@@ -33,17 +33,12 @@ from skimage.morphology import skeletonize
 from skimage.measure import label, regionprops
 from math import pi
 from typing import Optional
+from wellcounter_config import load_config
 
 # print(f"[DEBUG] Executing imaging module from: {__file__}", flush=True)
 
-def read_config(config_path="wellcounter_config.yml"):
-    try:
-        with open(config_path, "r") as config_file:
-            config = yaml.load(config_file, Loader=yaml.FullLoader)
-        return config
-    except Exception as e:
-        print(f"Error reading config file: {e}")
-        raise
+def _ensure_config(config=None):
+    return config if config is not None else load_config()
 
 # --- HELPER FUNCTIONS FOR IMAGE SEQUENCE HANDLING ---
 
@@ -162,12 +157,12 @@ def calculate_measurements(contour):
             'feret_diameter': feret_diameter, 'bounding_x': x, 'bounding_y': y, 'bounding_w': w, 'bounding_h': h}
 
 # --- MODIFIED FUNCTION: mask_well_area (added caching support) ---
-def mask_well_area(image, cached_center=None, cached_mask=None):
+def mask_well_area(image, cached_center=None, cached_mask=None, config=None):
     """
     Mask the well area of an image.
     If cached_center or cached_mask is provided, reuse them to skip recomputation.
     """
-    config = read_config()
+    config = _ensure_config(config)
     wellplate_params = config['wellplate']
     system_params = config['system']
 
@@ -215,8 +210,8 @@ def mask_well_area(image, cached_center=None, cached_mask=None):
     print(f"[mask_well_area] Well mask determined: center = {center}, radius = {radius}", flush=True)
     return result_image, mask
 
-def analyze_microorganisms(image):
-    config = read_config()
+def analyze_microorganisms(image, config=None):
+    config = _ensure_config(config)
     params = config['particle_detection']
     _, threshold = cv2.threshold(image, params['microorganism_threshold'], 255, cv2.THRESH_BINARY)
     threshold = cv2.medianBlur(threshold, params['microorganism_blur'])
@@ -227,8 +222,8 @@ def analyze_microorganisms(image):
     df = pd.DataFrame([m for cnt in valid_contours if (m := calculate_measurements(cnt)) is not None])
     return df, binary_image
 
-def analyze_unsubtracted(image):
-    config = read_config()
+def analyze_unsubtracted(image, config=None):
+    config = _ensure_config(config)
     params = config['particle_detection']
     _, threshold = cv2.threshold(image, params['unsubtracted_threshold'], 255, cv2.THRESH_BINARY)
     threshold = cv2.medianBlur(threshold, params['microorganism_blur'])
@@ -239,8 +234,8 @@ def analyze_unsubtracted(image):
     df = pd.DataFrame([m for cnt in valid_contours if (m := calculate_measurements(cnt)) is not None])
     return df.sort_values(by=['Y', 'X']) if not df.empty else df, binary_image
 
-def label_particles(image, table_of_particles):
-    config = read_config()
+def label_particles(image, table_of_particles, config=None):
+    config = _ensure_config(config)
     params = config['particle_detection']
     if len(image.shape) == 2: image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     search_radius = round(params['search_radius_factor'] * np.sqrt(params['default_particle_area'] / np.pi))
@@ -251,7 +246,7 @@ def label_particles(image, table_of_particles):
     return image
 
 
-def label_particles_by_type(image, joined_df):
+def label_particles_by_type(image, joined_df, config=None):
     """
     Overlay detected particles on an image with colors based on their particle type.
 
@@ -277,7 +272,7 @@ def label_particles_by_type(image, joined_df):
             return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         return image
 
-    config = read_config()
+    config = _ensure_config(config)
     params = config['particle_detection']
 
     if len(image.shape) == 2:
@@ -371,7 +366,7 @@ def label_particles_by_type(image, joined_df):
 
     return image
 
-def visualize_shape_filtering(image, df_before, df_after, output_path=None):
+def visualize_shape_filtering(image, df_before, df_after, output_path=None, config=None):
     """
     Visualize which particles were excluded by the shape filter.
 
@@ -403,7 +398,7 @@ def visualize_shape_filtering(image, df_before, df_after, output_path=None):
     excluded_coords = all_coords - kept_coords
 
     # Determine radius from config
-    config = read_config()
+    config = _ensure_config(config)
     params = config['particle_detection']
     radius = round(params['search_radius_factor'] *
                    np.sqrt(params['default_particle_area'] / np.pi))
@@ -436,7 +431,7 @@ def filter_particles_by_shape(df):
         print(f"[filter_particles_by_shape] Removed {removed} particles (area>3000 or solidity<0.2)")
     return filtered
 
-def compare_detected_particles(df_ref, df_query, measurement_cols=None):
+def compare_detected_particles(df_ref, df_query, measurement_cols=None, config=None):
     """
     Compare detected particles in two data frames (reference and query)
     based on spatial proximity in X, Y coordinates. Returns a merged data frame
@@ -461,7 +456,7 @@ def compare_detected_particles(df_ref, df_query, measurement_cols=None):
         [X, Y, <measurement_cols>, in_ref, in_query]
     """
     
-    config = read_config()
+    config = _ensure_config(config)
     params = config['particle_detection']
 
     # --- define essential columns
@@ -575,9 +570,9 @@ def compare_detected_particles(df_ref, df_query, measurement_cols=None):
 
     return merged[expected_cols]
 
-def spatial_analysis(table_of_particles):
+def spatial_analysis(table_of_particles, config=None):
     if table_of_particles.shape[0] <= 5: return np.nan
-    config = read_config()
+    config = _ensure_config(config)
     wellplate_params = config['wellplate']
     coordinates = table_of_particles[['X', 'Y']].values
     dist_matrix = distance_matrix(coordinates, coordinates)
@@ -591,7 +586,7 @@ def spatial_analysis(table_of_particles):
 
 # HIGH-LEVEL FUNCTIONS (frame-index based; pairwise comparisons) 
 
-def image_subtraction_from_sequence(image_file_list, frame_idx1, frame_idx2, cached_mask=None):
+def image_subtraction_from_sequence(image_file_list, frame_idx1, frame_idx2, cached_mask=None, config=None):
     """
     Subtract two frames given by frame indices (frame_idx1 - frame_idx2).
     Returns:
@@ -600,7 +595,7 @@ def image_subtraction_from_sequence(image_file_list, frame_idx1, frame_idx2, cac
 
     Reuses a cached mask if provided.
     """
-    config = read_config()
+    config = _ensure_config(config)
     wellplate_params = config['wellplate']
     image_a = get_frame_from_sequence(image_file_list, frame_idx1)
     image_b = get_frame_from_sequence(image_file_list, frame_idx2)
@@ -608,13 +603,13 @@ def image_subtraction_from_sequence(image_file_list, frame_idx1, frame_idx2, cac
         return None, None
     subtr_image = np.clip(cv2.subtract(image_a, image_b), 0, 255).astype(np.uint8)
     if wellplate_params['create_mask']:
-        masked_image, mask = mask_well_area(image_a, cached_mask=cached_mask)
+        masked_image, mask = mask_well_area(image_a, cached_mask=cached_mask, config=config)
         result_image = cv2.bitwise_and(subtr_image, subtr_image, mask=mask)
     else:
         result_image, masked_image = subtr_image, image_a
     return result_image, masked_image
 
-def image_analysis_of_sample(run_folder_path, image_file_list, ref_idx, sub_idx, cached_mask=None):
+def image_analysis_of_sample(run_folder_path, image_file_list, ref_idx, sub_idx, cached_mask=None, config=None):
     """
     Analyze a single pair of frames: subtract frame_idx2 from frame_idx1,
     detect particles on the subtraction and also provide the binary image and
@@ -624,10 +619,12 @@ def image_analysis_of_sample(run_folder_path, image_file_list, ref_idx, sub_idx,
     (no file saving is done here to avoid per-call CSV/image duplication;
      final saving occurs in count_particles() to match original output layout).
     """
-    subtr_image, masked_image = image_subtraction_from_sequence(image_file_list, ref_idx, sub_idx, cached_mask=cached_mask)
+    subtr_image, masked_image = image_subtraction_from_sequence(
+        image_file_list, ref_idx, sub_idx, cached_mask=cached_mask, config=config
+    )
     if subtr_image is None:
         return pd.DataFrame(), None, None
-    table_of_particles, binary_image = analyze_microorganisms(subtr_image)
+    table_of_particles, binary_image = analyze_microorganisms(subtr_image, config=config)
     # Ensure column exists even if empty
     if table_of_particles is None or table_of_particles.empty:
         table_of_particles = pd.DataFrame()
@@ -640,6 +637,7 @@ def count_particles(
     reference_indices=None,
     reference_frame_numbers=None,
     dataset_type=None,
+    config=None,
 ):
     """
     Top-level controller. This version implements the "temporal sampling" method
@@ -773,42 +771,54 @@ def count_particles(
     global_mask = None
     first_frame = get_frame_from_sequence(image_file_list, 0)
     if first_frame is not None:
-        _, global_mask = mask_well_area(first_frame)
+        _, global_mask = mask_well_area(first_frame, config=config)
 
     # --- Define output folder path (but don't create it yet) ---
     parent_dir = os.path.dirname(run_folder_path.rstrip("/\\"))
     folder_name = os.path.basename(run_folder_path.rstrip("/\\"))
     output_dir = os.path.join(parent_dir, f"{folder_name}_particle_analysis")
 
-    config = read_config()
+    config = _ensure_config(config)
     save_outputs = bool(config['outputs'].get('particle_detection', False))
 
     if save_outputs:
         os.makedirs(output_dir, exist_ok=True)
 
-    def run_single_analysis(ref_idx, sub1_idx, sub2_idx, output_dir):
+    def run_single_analysis(ref_idx, sub1_idx, sub2_idx, output_dir, config):
         """
         Mirrors the logic of the master script's image_analysis_of_sample.
         It takes one reference frame and performs two subtractions against it,
         merges the results, and validates against the unsubtracted frame.
         """
         # Perform the two subtractions from the reference frame
-        df_sub1, bin1, masked_ref = image_analysis_of_sample(run_folder_path, image_file_list, ref_idx, sub1_idx, cached_mask=global_mask)
-        df_sub2, bin2, _ = image_analysis_of_sample(run_folder_path, image_file_list, ref_idx, sub2_idx, cached_mask=global_mask)
+        df_sub1, bin1, masked_ref = image_analysis_of_sample(
+            run_folder_path,
+            image_file_list,
+            ref_idx,
+            sub1_idx,
+            cached_mask=global_mask,
+            config=config,
+        )
+        df_sub2, bin2, _ = image_analysis_of_sample(
+            run_folder_path,
+            image_file_list,
+            ref_idx,
+            sub2_idx,
+            cached_mask=global_mask,
+            config=config,
+        )
 
         # Merge the two subtraction results
-        merged_subs = compare_detected_particles(df_sub1, df_sub2)
+        merged_subs = compare_detected_particles(df_sub1, df_sub2, config=config)
 
-        # Read the config once and decide whether to save
-        config = read_config()
         save_outputs = bool(config['outputs'].get('particle_detection', False))
 
         # Analyze unsubtracted reference frame and compare
         ref_frame = get_frame_from_sequence(image_file_list, ref_idx)
         final_table = merged_subs  # Default if frame is unreadable
         if ref_frame is not None:
-            masked_fframe, _ = mask_well_area(ref_frame, cached_mask=global_mask)
-            df_unsub, binary_unsub = analyze_unsubtracted(masked_fframe)
+            masked_fframe, _ = mask_well_area(ref_frame, cached_mask=global_mask, config=config)
+            df_unsub, binary_unsub = analyze_unsubtracted(masked_fframe, config=config)
 
             # For debugging only: save intermediate images
             #if save_outputs:
@@ -828,9 +838,9 @@ def count_particles(
         #print(f"[run_single_analysis] RefFrame {ref_idx}: Found {len(df_sub1)} (vs {sub1_idx}) and {len(df_sub2)} (vs {sub2_idx}) particles. Final count: {len(final_table)}")
         return final_table, bin1, bin2, masked_ref, binary_unsub if 'binary_unsub' in locals() else None
     # Perform three INDEPENDENT analyses
-    final_table1, binary1, binary2, masked1, binary_unsub1 = run_single_analysis(frame1_idx, frame2_idx, frame3_idx, output_dir)
-    final_table2, _, _, _, _ = run_single_analysis(frame2_idx, frame1_idx, frame3_idx, output_dir)
-    final_table3, _, _, _, _ = run_single_analysis(frame3_idx, frame1_idx, frame2_idx, output_dir)
+    final_table1, binary1, binary2, masked1, binary_unsub1 = run_single_analysis(frame1_idx, frame2_idx, frame3_idx, output_dir, config)
+    final_table2, _, _, _, _ = run_single_analysis(frame2_idx, frame1_idx, frame3_idx, output_dir, config)
+    final_table3, _, _, _, _ = run_single_analysis(frame3_idx, frame1_idx, frame2_idx, output_dir, config)
 
     # Safely assign the true frame numbers and indices to each result table
     frame_value_map = {
@@ -848,7 +858,6 @@ def count_particles(
     final_table3['ref_frame_index'] = frame3_idx
 
     # Optional post-detection shape filtering
-    config = read_config()
     if config['particle_detection'].get('filter_by_shape', False):
         # Keep copies before filtering (for visualization)
         unfiltered1 = final_table1.copy()
@@ -865,19 +874,22 @@ def count_particles(
             first_frame = get_frame_from_sequence(image_file_list, frame1_idx)
             if first_frame is not None and not unfiltered1.empty:
                 output_path = os.path.join(output_dir, 'shape_filtered_particles_frame1.jpg')
-                visualize_shape_filtering(first_frame.copy(),
-                                        df_before=unfiltered1,
-                                        df_after=final_table1,
-                                        output_path=output_path)
+                visualize_shape_filtering(
+                    first_frame.copy(),
+                    df_before=unfiltered1,
+                    df_after=final_table1,
+                    output_path=output_path,
+                    config=config,
+                )
 
     # Calculate metrics by averaging the independent results
     p1 = len(final_table1)
     p2 = len(final_table2)
     p3 = len(final_table3)
 
-    nni1 = spatial_analysis(final_table1)
-    nni2 = spatial_analysis(final_table2)
-    nni3 = spatial_analysis(final_table3)
+    nni1 = spatial_analysis(final_table1, config=config)
+    nni2 = spatial_analysis(final_table2, config=config)
+    nni3 = spatial_analysis(final_table3, config=config)
 
     avg_particles = round((p1 + p2 + p3) / 3, 1)
     nni = np.nanmean([nni1, nni2, nni3])
@@ -895,7 +907,6 @@ def count_particles(
     summary_df = pd.DataFrame({'avg_particles': [avg_particles], 'median_particle_size': [median_area], 'spatial_nni': [nni]})
 
     # --- Output control ---
-    config = read_config()
     save_outputs = bool(config['outputs'].get('particle_detection', False))
 
     if save_outputs:
@@ -1000,6 +1011,7 @@ def count_complete(
     collage_metric: str = "centerline_mean_width",
     save_male_outputs: Optional[bool] = None,
     include_debug_tables: bool = False,
+    config=None,
 ):
     """Run an integrated particle and male analysis with combined reporting."""
 
@@ -1017,7 +1029,7 @@ def count_complete(
     if debug_env is not None:
         include_debug_tables = debug_env.lower() in {"1", "true", "yes", "on"}
 
-    config = read_config()
+    config = _ensure_config(config)
     outputs_enabled = bool(config.get('outputs', {}).get('particle_detection', False))
 
     image_file_list = []
@@ -1036,6 +1048,7 @@ def count_complete(
         reference_indices=reference_indices,
         reference_frame_numbers=reference_frame_numbers,
         dataset_type=dataset_type,
+        config=config,
     )
 
     from wellcounter_male_module import count_males
@@ -1046,6 +1059,7 @@ def count_complete(
         save_outputs=save_male_outputs,
         reference_indices=reference_indices,
         reference_frame_numbers=reference_frame_numbers,
+        config=config,
     )
 
     def normalize_frame_value(value, fallback):
@@ -1080,7 +1094,7 @@ def count_complete(
             query_mask = pd.Series([False] * len(all_particles), index=all_particles.index)
         df_query = all_particles[query_mask].copy()
 
-        joined_df = compare_detected_particles(df_ref, df_query).copy()
+        joined_df = compare_detected_particles(df_ref, df_query, config=config).copy()
         if joined_df.empty:
             joined_df = joined_df.copy()
 

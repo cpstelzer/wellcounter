@@ -24,14 +24,18 @@ import numpy as np
 import random
 import os
 import re
-import yaml
 import copy
+from wellcounter_config import load_config
 
 
 # --- UNCHANGED FUNCTIONS (Included for completeness) ---
 
-def track_particles(particles_by_frame):
-    config = wim.read_config()
+def _ensure_config(config=None):
+    return config if config is not None else load_config()
+
+
+def track_particles(particles_by_frame, config=None):
+    config = _ensure_config(config)
     motion_params = config['motion']
     trajectories = {}
     input_data = particles_by_frame.sort_values(by='frame')
@@ -50,8 +54,8 @@ def track_particles(particles_by_frame):
     return {k: v for k, v in trajectories.items() if len(v) >= motion_params['min_trajectory_size']}
 
 
-def visualize_trajectories(original_image, particle_trajectories):
-    config = wim.read_config()
+def visualize_trajectories(original_image, particle_trajectories, config=None):
+    config = _ensure_config(config)
     motion_params = config['motion']
     image_with_trajectories = cv2.cvtColor(original_image, cv2.COLOR_GRAY2BGR) if len(original_image.shape) == 2 else original_image.copy()
     h, w = original_image.shape[:2]
@@ -107,7 +111,8 @@ def summarize_movement_variables(mov_vars_df):
 def record_particle_positions_from_sequence(
     run_folder_path,
     ref_frame_no: int = 0,
-    rec_direction: str = 'forward'
+    rec_direction: str = 'forward',
+    config=None,
 ):
     """Record particle positions and accumulate a long-exposure image.
 
@@ -129,7 +134,7 @@ def record_particle_positions_from_sequence(
         DataFrame of detected particles and the accumulated long-exposure image.
     """
 
-    config = wim.read_config()
+    config = _ensure_config(config)
     motion_params = config['motion']
 
     # --- account for subdirectory containing images ---
@@ -166,7 +171,7 @@ def record_particle_positions_from_sequence(
     if reference_frame is None:
         return pd.DataFrame(), None
 
-    _, global_mask = wim.mask_well_area(reference_frame)
+    _, global_mask = wim.mask_well_area(reference_frame, config=config)
 
     height, width = reference_frame.shape
     long_exposure_image = np.zeros((height, width), dtype=np.uint8)
@@ -202,13 +207,14 @@ def record_particle_positions_from_sequence(
             image_file_list,
             frame_a_idx,
             frame_b_idx,
-            cached_mask=global_mask
+            cached_mask=global_mask,
+            config=config,
         )
         if subtr_image is None:
             current_idx += step
             continue
 
-        table_of_particles, binary_image = wim.analyze_microorganisms(subtr_image)
+        table_of_particles, binary_image = wim.analyze_microorganisms(subtr_image, config=config)
 
         actual_frame_number = None
         if 0 <= frame_a_idx < len(frame_number_lookup):
@@ -229,7 +235,8 @@ def record_particle_positions_from_sequence(
 def generate_long_exposure_image_custom(
     run_folder_path,
     ref_frame_no: int = 0,
-    rec_direction: str = 'forward'
+    rec_direction: str = 'forward',
+    config=None,
 ):
     """
     Generate a Long Exposure Image (LEI) using configuration-managed parameters.
@@ -260,48 +267,34 @@ def generate_long_exposure_image_custom(
 
     import os
     import cv2
-    import yaml
     import wellcounter_imaging_module as wim
 
-    # --- Locate and read config file ---
-    config_path = "wellcounter_config.yml"
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-    original_config = copy.deepcopy(config)
+    base_config = _ensure_config(config)
+    runtime_config = copy.deepcopy(base_config)
 
-    male_params = config.get('male_analysis', {})
+    male_params = runtime_config.get('male_analysis', {})
     analysis_duration = float(male_params.get('duration', 0.5))
     microorganism_threshold = int(male_params.get('threshold', 12))
     min_microorganism_area = int(male_params.get('min_area', 105))
 
-    # --- Apply temporary parameters ---
-    config['motion']['analysis_duration'] = analysis_duration
-    config['particle_detection']['microorganism_threshold'] = microorganism_threshold
-    config['particle_detection']['min_microorganism_area'] = min_microorganism_area
+    runtime_config['motion']['analysis_duration'] = analysis_duration
+    runtime_config['particle_detection']['microorganism_threshold'] = microorganism_threshold
+    runtime_config['particle_detection']['min_microorganism_area'] = min_microorganism_area
 
-    # --- Write modified config to disk ---
-    with open(config_path, "w") as f:
-        yaml.safe_dump(config, f)
-    print("[generate_long_exposure_image_custom] Temporary config written to disk:")
-    print(f"  motion.analysis_duration = {config['motion']['analysis_duration']}")
-    print(f"  particle_detection.microorganism_threshold = {config['particle_detection']['microorganism_threshold']}")
-    print(f"  particle_detection.min_microorganism_area = {config['particle_detection']['min_microorganism_area']}")
+    print("[generate_long_exposure_image_custom] Using in-memory config overrides:")
+    print(f"  motion.analysis_duration = {runtime_config['motion']['analysis_duration']}")
+    print(f"  particle_detection.microorganism_threshold = {runtime_config['particle_detection']['microorganism_threshold']}")
+    print(f"  particle_detection.min_microorganism_area = {runtime_config['particle_detection']['min_microorganism_area']}")
 
-    # --- Run the standard particle recording function ---
-    try:
-        result_df, long_exposure_image = record_particle_positions_from_sequence(
-            run_folder_path,
-            ref_frame_no=ref_frame_no,
-            rec_direction=rec_direction
-        )
-    finally:
-        # --- Always restore the original config ---
-        with open(config_path, "w") as f:
-            yaml.safe_dump(original_config, f)
-        print("[generate_long_exposure_image_custom] Original config restored.")
+    result_df, long_exposure_image = record_particle_positions_from_sequence(
+        run_folder_path,
+        ref_frame_no=ref_frame_no,
+        rec_direction=rec_direction,
+        config=runtime_config,
+    )
 
     # --- Save the long-exposure image if output enabled ---
-    output_params = original_config.get('outputs', {})
+    output_params = runtime_config.get('outputs', {})
     if long_exposure_image is None:
         print("[generate_long_exposure_image_custom] Failed to generate LEI.")
         return result_df, None
@@ -336,26 +329,26 @@ def generate_long_exposure_image_custom(
 
 
 
-def perform_motion_analysis(run_folder_path):
+def perform_motion_analysis(run_folder_path, config=None):
     """
     Performs high-level motion analysis on image sequences located in 'run_folder_path/jpg'.
     Outputs motion analysis results and associated graphical visualizations if enabled in the config file.
     """
 
-    config = wim.read_config()
+    config = _ensure_config(config)
     output_params = config['outputs']
 
     # --- Image data resides in a 'jpg' subfolder ---
     image_folder = os.path.join(run_folder_path, "jpg")
 
     # --- Record particle positions from sequence ---
-    positions_df, long_exposure_image = record_particle_positions_from_sequence(run_folder_path)
+    positions_df, long_exposure_image = record_particle_positions_from_sequence(run_folder_path, config=config)
     if long_exposure_image is None or positions_df.empty:
         print("[perform_motion_analysis] No valid frames or particles detected.")
         return pd.DataFrame()
 
     # --- Track particles and extract motion parameters ---
-    trajectories = track_particles(positions_df)
+    trajectories = track_particles(positions_df, config=config)
     movement_variables = extract_movement_variables(trajectories)
     summary_df = summarize_movement_variables(movement_variables)
 
@@ -371,7 +364,7 @@ def perform_motion_analysis(run_folder_path):
             print("[perform_motion_analysis] Warning: could not read first frame for visualization.")
 
         # --- Visualize trajectories ---
-        image_with_tracks, tracks_only = visualize_trajectories(long_exposure_image, trajectories)
+        image_with_tracks, tracks_only = visualize_trajectories(long_exposure_image, trajectories, config=config)
 
         # --- Save results ---
         positions_df.to_csv(os.path.join(output_path, 'particle_positions.csv'), index=False)
